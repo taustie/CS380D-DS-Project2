@@ -1,56 +1,39 @@
 package dynamo
 
 //
-// Raft tests.
-//
-// we will use the original test_test.go to test your code for grading.
-// so, while you can modify this code to help you debug, please
-// test with the original before submitting.
+// Dynamo tests.
 //
 
 import (
 	"fmt"
 	"testing"
-	"time"
 )
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
-const RaftElectionTimeout = 1000 * time.Millisecond
+// const RaftElectionTimeout = 1000 * time.Millisecond
 
-func put(key []byte, context []int, value int) bool {
-	return true
-}
-
-func get(key []byte) (bool, []int, []int) {
-	var value []int = []int{0}
-	context := []int{0}
-	return true, value, context
-}
-
-// Description: During normal operation with no node failures, test that all
-// values are written to Dynamo clusters. We can expect all values to match despite
-// being eventually consistent because the coordinator nodes will handle this test.
-func TestNormalGetPut2A(t *testing.T) {
+// Description:
+// 1) Configure: # nodes = arbitrary, # replicas = arbitrary, R = 1, W = 1
+// 2) Send many put requests to the Dynamo cluster using normal operating conditions (no node failures)
+// 3) Send many get requests to the Dynamo cluster.
+// 4) Verify all values match expected value since coordinator will handle response.
+func TestNormalMinQuorum2A(t *testing.T) {
 	// *** functions implemented in dynamo_wrapper and called here ***
-	// Configure total number of nodes + total number of replicas
-	// start up dynamo (bring all nodes online, generate the static preference list, enable the network)
-	// Set the R=2 and W requirements for quorom
-	// configure the timeout parameter between client and dynamo cluster
+	// Config # nodes, # replicas, R, W
+	// Start-up dynamo (bring all nodes online, generate the static preference list, enable the network)
+	// Set the client to cluster and vice versa timeout parameter
+	// To do: In dynamo.go need a dynamo node timeout parameters for failure detector
 
 	test_count := 100
 	for i := 0; i < test_count; i++ {
 		key_string := fmt.Sprintf("\"Key number: %d\"", i)
 		key := []byte(key_string)
 		value := i
-		ack := put(key, nil, value, coordinator)
-		// Move actual hashing into dynamo.go
-		// data := []byte("These pretzels are making me thirsty.")
-		// fmt.Printf("%x\n", md5.Sum(data))
-		// fmt.Printf("len: %d\n", len(md5.Sum(data)))
-		// fmt.Printf("cap: %d\n", cap(md5.Sum(data)))
+		var context Context
+		ack := put(key, value, context)
 		if !ack {
-			t.Fatalf("Failed to receive ack from dynamo cluster on put(%s, nil, %d)", key_string, value)
+			t.Fatalf("No ack received from dynamo cluster on put(%s, nil, %d)", key_string, value)
 		}
 	}
 
@@ -73,62 +56,47 @@ func TestNormalGetPut2A(t *testing.T) {
 	// fmt.Printf("  %4.1f  %d %4d %7d %4d\n", t, npeers, nrpc, nbytes, ncmds)
 }
 
-// Description: Write multiple values to dynamo.  Eventually, a coordinator node fails.
-// Verify the failure detector detects the node has failed after some time, by watching the
-// updates to the global preference list.
-// Verify the hinted handoff -> using 4 nodes, 2 replicas, require R = 2, W = 2
-func TestCoordFailure2A(t *testing.T) {
-	// use 4 node, 2 replica setup
-	// R = 2, W = 2
+// Description:
+// 1) Configure: # nodes > 5, # replicas >= 5, R = all replicas, W = all replicas
+// 2) Send many put requests to the Dynamo cluster using normal operating conditions (no node failures)
+// 3) Send many get requests to the Dynamo cluster.
+// 4) Check if all values match expected value and if any fail since a quorum must handle response.
+func TestNormalMaxQuorum2A(t *testing.T) {
 
 }
 
-// Description: Write multiple values to dynamo.  Eventually, a coordinator node fails.
-// Write some new values to the cluster with a failed coordinator.  Revive the coordinator node.
-// Dynamo_wrapper must have a copy of the latest global preference list at all times.  Write or read
-// at least one value to the revived coordinator node key group, then wait for the
-// global preference list to include the revived node, before verifying the updated put values.
-// Then, perform a read operation on a key that was updated on the rest of the cluster.
-// Verify that stale data is not returned since R = 3 & W = 2. Verify at the node level that the coordinator
-// has actually received the latest update
-func TestStaleData2A(t *testing.T) {
-	// *** functions implemented in dynamo_wrapper and called here ***
-	// Configure total number of nodes 10. Total number of replicas = 3
-	// start up dynamo (bring all nodes online, generate the static preference list, enable the network)
-	// Set the R=3 and W=2 requirements for quorom
-	// configure the timeout parameter between client and dynamo cluster
+// Description:
+// 1) Configure: # nodes = arbitrary, # replicas = arbitrary, R = # replicas, W = # replicas
+// 2) Write multiple values to dynamo.
+// 3) Eventually, trigger a coordinator node failure.
+// 4) Verify the failure detector detects the node has failed after some time,
+// 5) Wait for updates to the global preference list.
+// 6) Write multiple updates to dynamo and verify all are successful (hinted handoff worked)
+func TestSingleNodeFailure2B(t *testing.T) {
 
-	test_count := 1000
-	for i := 0; i < test_count; i++ {
-		key_string := fmt.Sprintf("\"Key number: %d\"", i)
-		key := []byte(key_string)
-		value := i
-		ack := put(key, nil, value)
-		// Move actual hashing into dynamo.go
-		// data := []byte("These pretzels are making me thirsty.")
-		// fmt.Printf("%x\n", md5.Sum(data))
-		// fmt.Printf("len: %d\n", len(md5.Sum(data)))
-		// fmt.Printf("cap: %d\n", cap(md5.Sum(data)))
-		if !ack {
-			t.Fatalf("Failed to receive ack from dynamo cluster on put(%s, nil, %d)", key_string, value)
-		}
-	}
+}
 
-	for i := 0; i < test_count; i++ {
-		key_string := fmt.Sprintf("\"Key number: %d\"", i)
-		key := []byte(key_string)
-		ack, value, _ := get(key)
-		if ack == false {
-			t.Fatalf("Failed to receive ack from dynamo cluster on get(%s)", key_string)
-		}
-		if len(value) != 1 {
-			t.Fatalf("Received too many or too few return values: %d on get(%s)", len(value), key_string)
-		}
-		if value[0] != i {
-			t.Fatalf("get(%s) returned value %d which does not match expected value %d", key_string, value[0], i)
-		}
-	}
+// Description:
+// 1) Configure: # nodes = arbitrary, # replicas = arbitrary, R = # replicas, W = # replicas
+// 2) Perform TestSingleNodeFailure2B steps 2-6
+// 4) Revive the coordinator node.
+// 5) Wait for updates to the global preference list.
+// 6) Once updated, target the revived coordinator using get requests.
+// 7) Verify stale data is not returned
+func TestStaleData2B(t *testing.T) {
 
-	fmt.Printf("  ... Passed --\n")
-	// fmt.Printf("  %4.1f  %d %4d %7d %4d\n", t, npeers, nrpc, nbytes, ncmds)
+}
+
+// Description:
+// 1) Configure: # nodes = arbitrary, # replicas = arbitrary, R = # replicas, W = # replicas
+// 2)
+func TestRingPartition2C(t *testing.T) {
+
+}
+
+// Description:
+// 1) Configure: # nodes = arbitrary, # replicas = arbitrary, R = # replicas, W = # replicas
+// 2)
+func TestRingPartitionWithNodeFailure2C(t *testing.T) {
+
 }
