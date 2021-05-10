@@ -1,30 +1,10 @@
 package dynamo
 
-// Input:
-//	key string
-//	value
-//	context metadata
-func put(key []byte, value int, context Context) bool {
-	return true
-}
-
 // To do: implement get in dynamo_wrapper.go
 // This function handles client get request, but we
 // need intermediate layer for controlling the network.
 // For requests that get through, these parameters are copied
 // to a new message that is sent to dynamo cluster
-
-// Input:
-//	key string
-// Output:
-//	message acknowlegdge (true if received a response, false on timeout)
-//	value array (there may be multiple conflicting objects)
-//	context metadata (one entry per object)
-func get(key []byte) (bool, []int, Context) {
-	var value []int = []int{0}
-	context := Context{0, []int{0}}
-	return true, value, context
-}
 
 // To do:
 // *** functions implemented in dynamo_wrapper and called here ***
