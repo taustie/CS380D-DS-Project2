@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand"
 	"testing"
+	"time"
 
 	// "github.com/jbondeson/vclock"
 	"github.com/DistributedClocks/GoVector/govec/vclock"
@@ -81,8 +82,8 @@ func TestNormalMinQuorum2A(t *testing.T) {
 // 4) Check if all values match expected value and if any fail since a quorum must handle response.
 func TestNormalMaxQuorum2A(t *testing.T) {
 	// *** functions implemented in dynamo_wrapper and called here ***
-	nodes := 100
-	replicas := 90
+	nodes := 10
+	replicas := 3
 	quorumR := replicas
 	quorumW := replicas
 	// Start-up dynamo (Config # nodes, # replicas, R, W, bring all nodes online, generate the static preference list, enable the network)
@@ -93,7 +94,7 @@ func TestNormalMaxQuorum2A(t *testing.T) {
 	// Set the client to cluster and vice versa timeout parameter
 	// To do: In dynamo.go need a dynamo node timeout parameters for its failure detector
 
-	test_count := 1000
+	test_count := 100
 	for i := 0; i < test_count; i++ {
 		keyString := fmt.Sprintf("\"Key number: %d\"", i)
 		object := i
@@ -117,6 +118,102 @@ func TestNormalMaxQuorum2A(t *testing.T) {
 		DPrintfNew(InfoLevel, "Called Get()")
 		ack := rfClient.peers[peerNumber].Call("Dynamo.Get", &args, &reply)
 		if ack == false {
+			t.Fatalf("Failed to receive ack from dynamo cluster on get(%s)", keyString)
+		}
+		if len(reply.Object) != 1 {
+			t.Fatalf("Received too many or too few return values: %d on get(%s) in value: %v", len(reply.Object), keyString, reply.Object)
+		}
+		DPrintfNew(InfoLevel, "Dynamo reply.Object[0]: %v", reply.Object[0])
+		if reply.Object[0] != i {
+			t.Fatalf("get(%s) returned value %d which does not match expected value %d", keyString, reply.Object[0], i)
+		}
+	}
+
+	cfg.end()
+}
+
+// Description:
+// 1) Configure: # nodes = arbitrary, # replicas = arbitrary, R = # replicas, W = # replicas
+// 2) Write multiple values to dynamo.
+// 3) Eventually, trigger a coordinator node failure.
+// 4) Verify the failure detector detects the node has failed after some time,
+// 5) Wait for updates to the global preference list.
+// 6) Write multiple updates to dynamo and verify all are successful (hinted handoff worked)
+func TestSingleNodeFailure2B(t *testing.T) {
+	// *** functions implemented in dynamo_wrapper and called here ***
+	nodes := 10
+	replicas := 3
+	quorumR := replicas
+	quorumW := replicas
+	// Start-up dynamo (Config # nodes, # replicas, R, W, bring all nodes online, generate the static preference list, enable the network)
+	cfg := make_config(t, nodes, replicas, quorumR, quorumW, false)
+	defer cfg.cleanup()
+	cfg.begin("Test (2A): use maximum quorum size during normal operation")
+
+	// Set the client to cluster and vice versa timeout parameter
+	// To do: In dynamo.go need a dynamo node timeout parameters for its failure detector
+
+	test_count := 100
+	for i := 0; i < test_count; i++ {
+		keyString := fmt.Sprintf("\"Key number: %d\"", i)
+		object := i
+		var context Context
+		args := PutArgs{keyString, object, context}
+		reply := PutReply{}
+		peerNumber := rand.Intn(nodes)
+		rfClient := cfg.dynamoNodes[nodes]
+		ack := rfClient.peers[peerNumber].Call("Dynamo.Put", &args, &reply)
+		if !ack {
+			t.Fatalf("No ack received from dynamo cluster on put(%s, nil, %d)", keyString, args.Object)
+		}
+	}
+
+	peerNumber := rand.Intn(nodes)
+	cfg.disconnect(peerNumber)
+
+	// wait for failure detector response
+	var inspectPrefListNode int
+	var iterationCount int
+	if peerNumber == 0 {
+		inspectPrefListNode = 1
+	} else {
+		inspectPrefListNode = 0
+	}
+	for {
+		if iterationCount == 30 {
+			t.Fatalf("Failure detector did not detect that node %v was down", peerNumber)
+		}
+		iterationCount++
+		if cfg.dynamoNodes[inspectPrefListNode].prefList[peerNumber][0] == -1 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	for i := 0; i < test_count; i++ {
+		keyString := fmt.Sprintf("\"Key: %d\"", i+1)
+		object := i
+		var context Context
+		args := PutArgs{keyString, object, context}
+		reply := PutReply{}
+		peerNumber := rand.Intn(nodes)
+		rfClient := cfg.dynamoNodes[nodes]
+		ack := rfClient.peers[peerNumber].Call("Dynamo.Put", &args, &reply)
+		if !ack {
+			t.Fatalf("No ack received from dynamo cluster on put(%s, nil, %d)", keyString, args.Object)
+		}
+	}
+
+	for i := 0; i < test_count; i++ {
+		keyString := fmt.Sprintf("\"Key: %d\"", i+1)
+		args := GetArgs{keyString}
+		reply := GetReply{}
+		peerNumber := rand.Intn(nodes)
+		rfClient := cfg.dynamoNodes[nodes]
+		DPrintfNew(InfoLevel, "Called Get()")
+		ack := rfClient.peers[peerNumber].Call("Dynamo.Get", &args, &reply)
+		if ack == false {
+
 			t.Fatalf("Failed to receive ack from dynamo cluster on get(%s)", keyString)
 		}
 		if len(reply.Object) != 1 {
@@ -168,17 +265,6 @@ func TestVectorClockEx(t *testing.T) {
 
 func failComparison(t *testing.T, failMessage string, clock1, clock2 vclock.VClock) {
 	t.Fatalf(failMessage, clock1.ReturnVCString(), clock2.ReturnVCString())
-}
-
-// Description:
-// 1) Configure: # nodes = arbitrary, # replicas = arbitrary, R = # replicas, W = # replicas
-// 2) Write multiple values to dynamo.
-// 3) Eventually, trigger a coordinator node failure.
-// 4) Verify the failure detector detects the node has failed after some time,
-// 5) Wait for updates to the global preference list.
-// 6) Write multiple updates to dynamo and verify all are successful (hinted handoff worked)
-func TestSingleNodeFailure2B(t *testing.T) {
-
 }
 
 // Description:

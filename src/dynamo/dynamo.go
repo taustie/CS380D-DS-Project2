@@ -75,6 +75,7 @@ type Dynamo struct {
 	quorumW   int
 
 	keyValue map[string]ValueField
+	prefList map[int][]int
 }
 
 func (rf *Dynamo) findCoordinator(key string) int {
@@ -164,7 +165,7 @@ func (rf *Dynamo) RoutePutToCoordinator(args *PutArgs, reply *PutReply) {
 		DPrintfNew(ErrorLevel, "Put request routed to incorrect coordinator node: %v", coordinatorNode)
 		return
 	}
-	go rf.dynamoPut(args, reply)
+	rf.dynamoPut(args, reply)
 	return
 }
 
@@ -199,6 +200,10 @@ func (rf *Dynamo) dynamoGet(args *GetArgs, reply *GetReply) {
 	tempVectorTimestamp := rf.keyValue[args.Key].Timestamp
 
 	if readCount < rf.quorumR {
+
+		// Waiting for a subset of go routines to complete
+		// Use https://stackoverflow.com/questions/52227954/waitgroup-on-subset-of-go-routines
+
 		// buffered channel up to read quorum - 1 returns
 		ackChan := make(chan int, rf.quorumR-1)
 		dynamoReply := make([]DynamoGetReply, rf.replicas-1)
@@ -267,6 +272,9 @@ func (rf *Dynamo) dynamoPut(args *PutArgs, reply *PutReply) {
 
 	writeCount := 1
 	if writeCount < rf.quorumW {
+		// Waiting for a subset of go routines to complete
+		// Use https://stackoverflow.com/questions/52227954/waitgroup-on-subset-of-go-routines
+
 		updatedArgs := DynamoPutArgs{}
 		updatedArgs.Key = args.Key
 		updatedArgs.Object = value
@@ -278,7 +286,7 @@ func (rf *Dynamo) dynamoPut(args *PutArgs, reply *PutReply) {
 			intendedNode := (rf.me + i + 1) % rf.nodeCount
 			go rf.sendReplicaData(ackChan, i, intendedNode, &updatedArgs, &dynamoReply[i])
 		}
-		for responseCount := 0; responseCount < rf.quorumR-1; responseCount++ {
+		for responseCount := 0; responseCount < rf.quorumW-1; responseCount++ {
 			index := <-ackChan
 			DPrintfNew(InfoLevel, "dynamoPut received reply from replica: %v", dynamoReply[index].NodeID)
 		}
@@ -318,6 +326,7 @@ func (rf *Dynamo) Kill() {
 //
 func Make(peers []*labrpc.ClientEnd, me int, replicaCount int, quorumR int, quorumW int) *Dynamo {
 	rf := &Dynamo{}
+
 	rf.peers = peers
 	rf.me = me
 
@@ -328,6 +337,18 @@ func Make(peers []*labrpc.ClientEnd, me int, replicaCount int, quorumR int, quor
 	rf.quorumW = quorumW
 
 	rf.keyValue = make(map[string]ValueField)
+	rf.prefList = make(map[int][]int)
+	for i := 0; i <= rf.nodeCount; i++ {
+		rf.prefList[i] = []int{i}
+	}
+
+	// if(rf.me == rf.nodeCount){
+	// 	// for client
+	//
+	// }else{
+	// 	// launch failure detector for regular dynamo nodes
+	//
+	// }
 
 	// rf.nextIndex = make([]int, len(rf.peers))
 	// rf.matchIndex = make([]int, len(rf.peers))
