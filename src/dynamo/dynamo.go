@@ -58,9 +58,9 @@ type Context struct {
 	VectorTimestamp vclock.VClock
 }
 
-type valueField struct {
-	data      int
-	timestamp vclock.VClock
+type ValueField struct {
+	Data      int
+	Timestamp vclock.VClock
 }
 
 type Dynamo struct {
@@ -74,7 +74,7 @@ type Dynamo struct {
 	quorumR   int
 	quorumW   int
 
-	keyValue map[string]valueField
+	keyValue map[string]ValueField
 }
 
 func (rf *Dynamo) findCoordinator(key string) int {
@@ -168,32 +168,122 @@ func (rf *Dynamo) RoutePutToCoordinator(args *PutArgs, reply *PutReply) {
 	return
 }
 
+type DynamoGetReply struct {
+	NodeID int
+	Object ValueField
+}
+
+func (rf *Dynamo) DynamoGetObject(args *GetArgs, dynamoReply *DynamoGetReply) {
+	dynamoReply.NodeID = rf.me
+	dynamoReply.Object = rf.keyValue[args.Key]
+}
+
+func (rf *Dynamo) requestReplicaData(ackChan chan int, index int, intendedNode int, args *GetArgs, dynamoReply *DynamoGetReply) {
+	DPrintfNew(InfoLevel, "Sending replica: %v get request", intendedNode)
+	ack := rf.peers[intendedNode].Call("Dynamo.DynamoGetObject", args, dynamoReply)
+	if ack == true {
+		// return index that responded
+		ackChan <- index
+	} else {
+		// this node did not reply and can print timeout msg
+	}
+}
+
 // apply the put request to the coordinator node
 func (rf *Dynamo) dynamoGet(args *GetArgs, reply *GetReply) {
 	// To do: launch new go routine where coordinator gets data from repliicas
+	DPrintfNew(InfoLevel, "Coordinator Node: %v is handling get request", rf.me)
+	readCount := 1
+	tempObject := make([]int, 0)
+	tempObject = append(tempObject, rf.keyValue[args.Key].Data)
+	tempVectorTimestamp := rf.keyValue[args.Key].Timestamp
 
-	reply.Object = make([]int, 0) //make([]int, 1)
-	reply.Object = append(reply.Object, rf.keyValue[args.Key].data)
-	DPrintfNew(InfoLevel, "dynamoPut replying with object: %v", reply.Object)
-	reply.Context.VectorTimestamp = rf.keyValue[args.Key].timestamp
+	if readCount < rf.quorumR {
+		// buffered channel up to read quorum - 1 returns
+		ackChan := make(chan int, rf.quorumR-1)
+		dynamoReply := make([]DynamoGetReply, rf.replicas-1)
+		for i := 0; i < rf.replicas-1; i++ {
+			// To do: update to use the real-time preference list
+			intendedNode := (rf.me + i + 1) % rf.nodeCount
+			go rf.requestReplicaData(ackChan, i, intendedNode, args, &dynamoReply[i])
+		}
+		for responseCount := 0; responseCount < rf.quorumR-1; responseCount++ {
+			index := <-ackChan
+			DPrintfNew(InfoLevel, "dynamoGet received reply from replica: %v", dynamoReply[index].NodeID)
+			if dynamoReply[index].Object.Data != rf.keyValue[args.Key].Data {
+				tempObject = append(tempObject, dynamoReply[index].Object.Data)
+			}
+		}
+	}
+
+	reply.Object = tempObject
+	reply.Context.VectorTimestamp = tempVectorTimestamp
+	// time.Sleep(10 * time.Second)
+	return
+}
+
+type DynamoPutReply struct {
+	NodeID int
+}
+
+type DynamoPutArgs struct {
+	Key    string
+	Object ValueField
+}
+
+func (rf *Dynamo) DynamoPutObject(dynamoArgs *DynamoPutArgs, dynamoReply *DynamoPutReply) {
+	dynamoReply.NodeID = rf.me
+	// To do: check vector timestamps before writing it to know if need to preserve the data
+	rf.keyValue[dynamoArgs.Key] = dynamoArgs.Object
+}
+
+func (rf *Dynamo) sendReplicaData(ackChan chan int, index int, intendedNode int, args *DynamoPutArgs, dynamoReply *DynamoPutReply) {
+	DPrintfNew(InfoLevel, "Sending replica: %v put request", intendedNode)
+	ack := rf.peers[intendedNode].Call("Dynamo.DynamoPutObject", args, dynamoReply)
+	if ack == true {
+		// return index that responded
+		ackChan <- index
+	} else {
+		// this node did not reply and can print timeout msg
+	}
 }
 
 // apply the put request to the coordinator node
 func (rf *Dynamo) dynamoPut(args *PutArgs, reply *PutReply) {
-	// add this data to dynamo data
+	// add this data to the current dynamo node
+	DPrintfNew(InfoLevel, "Coordinator Node: %v is handling put request", rf.me)
 	value, exists := rf.keyValue[args.Key]
 	if exists {
+		// to do: handle case of updating existing key
 
 	} else {
-		value = valueField{}
-		value.data = args.Object
-		value.timestamp = vclock.New()
+		value = ValueField{}
+		value.Data = args.Object
+		value.Timestamp = vclock.New()
 		meString := strconv.Itoa(rf.me)
-		value.timestamp.Set(meString, 1)
+		value.Timestamp.Set(meString, 1)
 		rf.keyValue[args.Key] = value
 	}
 
-	// second, forward the request to the other replicas
+	writeCount := 1
+	if writeCount < rf.quorumW {
+		updatedArgs := DynamoPutArgs{}
+		updatedArgs.Key = args.Key
+		updatedArgs.Object = value
+		// buffered channel up to read quorum - 1 returns
+		ackChan := make(chan int, rf.quorumW-1)
+		dynamoReply := make([]DynamoPutReply, rf.replicas-1)
+		for i := 0; i < rf.replicas-1; i++ {
+			// To do: update to use the real-time preference list
+			intendedNode := (rf.me + i + 1) % rf.nodeCount
+			go rf.sendReplicaData(ackChan, i, intendedNode, &updatedArgs, &dynamoReply[i])
+		}
+		for responseCount := 0; responseCount < rf.quorumR-1; responseCount++ {
+			index := <-ackChan
+			DPrintfNew(InfoLevel, "dynamoPut received reply from replica: %v", dynamoReply[index].NodeID)
+		}
+	}
+
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -237,7 +327,7 @@ func Make(peers []*labrpc.ClientEnd, me int, replicaCount int, quorumR int, quor
 	rf.quorumR = quorumR
 	rf.quorumW = quorumW
 
-	rf.keyValue = make(map[string]valueField)
+	rf.keyValue = make(map[string]ValueField)
 
 	// rf.nextIndex = make([]int, len(rf.peers))
 	// rf.matchIndex = make([]int, len(rf.peers))

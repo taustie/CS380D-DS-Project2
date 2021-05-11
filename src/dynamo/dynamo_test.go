@@ -74,6 +74,63 @@ func TestNormalMinQuorum2A(t *testing.T) {
 	cfg.end()
 }
 
+// Description:
+// 1) Configure: # nodes > 5, # replicas >= 5, R = all replicas, W = all replicas
+// 2) Send many put requests to the Dynamo cluster using normal operating conditions (no node failures)
+// 3) Send many get requests to the Dynamo cluster.
+// 4) Check if all values match expected value and if any fail since a quorum must handle response.
+func TestNormalMaxQuorum2A(t *testing.T) {
+	// *** functions implemented in dynamo_wrapper and called here ***
+	nodes := 100
+	replicas := 90
+	quorumR := replicas
+	quorumW := replicas
+	// Start-up dynamo (Config # nodes, # replicas, R, W, bring all nodes online, generate the static preference list, enable the network)
+	cfg := make_config(t, nodes, replicas, quorumR, quorumW, false)
+	defer cfg.cleanup()
+	cfg.begin("Test (2A): use maximum quorum size during normal operation")
+
+	// Set the client to cluster and vice versa timeout parameter
+	// To do: In dynamo.go need a dynamo node timeout parameters for its failure detector
+
+	test_count := 1000
+	for i := 0; i < test_count; i++ {
+		keyString := fmt.Sprintf("\"Key number: %d\"", i)
+		object := i
+		var context Context
+		args := PutArgs{keyString, object, context}
+		reply := PutReply{}
+		peerNumber := rand.Intn(nodes)
+		rfClient := cfg.dynamoNodes[nodes]
+		ack := rfClient.peers[peerNumber].Call("Dynamo.Put", &args, &reply)
+		if !ack {
+			t.Fatalf("No ack received from dynamo cluster on put(%s, nil, %d)", keyString, args.Object)
+		}
+	}
+
+	for i := 0; i < test_count; i++ {
+		keyString := fmt.Sprintf("\"Key number: %d\"", i)
+		args := GetArgs{keyString}
+		reply := GetReply{}
+		peerNumber := rand.Intn(nodes)
+		rfClient := cfg.dynamoNodes[nodes]
+		DPrintfNew(InfoLevel, "Called Get()")
+		ack := rfClient.peers[peerNumber].Call("Dynamo.Get", &args, &reply)
+		if ack == false {
+			t.Fatalf("Failed to receive ack from dynamo cluster on get(%s)", keyString)
+		}
+		if len(reply.Object) != 1 {
+			t.Fatalf("Received too many or too few return values: %d on get(%s) in value: %v", len(reply.Object), keyString, reply.Object)
+		}
+		DPrintfNew(InfoLevel, "Dynamo reply.Object[0]: %v", reply.Object[0])
+		if reply.Object[0] != i {
+			t.Fatalf("get(%s) returned value %d which does not match expected value %d", keyString, reply.Object[0], i)
+		}
+	}
+
+	cfg.end()
+}
+
 func TestVectorClockEx(t *testing.T) {
 	n1 := vclock.New()
 	n2 := vclock.New()
@@ -111,15 +168,6 @@ func TestVectorClockEx(t *testing.T) {
 
 func failComparison(t *testing.T, failMessage string, clock1, clock2 vclock.VClock) {
 	t.Fatalf(failMessage, clock1.ReturnVCString(), clock2.ReturnVCString())
-}
-
-// Description:
-// 1) Configure: # nodes > 5, # replicas >= 5, R = all replicas, W = all replicas
-// 2) Send many put requests to the Dynamo cluster using normal operating conditions (no node failures)
-// 3) Send many get requests to the Dynamo cluster.
-// 4) Check if all values match expected value and if any fail since a quorum must handle response.
-func TestNormalMaxQuorum2A(t *testing.T) {
-
 }
 
 // Description:
