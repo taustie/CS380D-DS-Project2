@@ -51,6 +51,7 @@ package labrpc
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"math/rand"
 	"reflect"
@@ -84,7 +85,7 @@ type ClientEnd struct {
 // send an RPC, wait for the reply.
 // the return value indicates success; false means that
 // no reply was received from the server.
-func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bool {
+func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}, timeout int) bool {
 	req := reqMsg{}
 	req.endname = e.endname
 	req.svcMeth = svcMeth
@@ -111,16 +112,22 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	// wait for the reply.
 	//
 
-	rep := <-req.replyCh
-
-	// rep := replyMsg{}
-	// select {
-	// case rep = <-req.replyCh:
-	// 	// the replpy has been received.
-	// case <-time.After(time.Second * 2):
-	// 	fmt.Println("RPC: ", svcMeth, " timed out")
-	// 	rep.ok = false
-	// }
+	rep := replyMsg{}
+	if timeout == -1 {
+		// this case is used by the single client
+		// original version waits forever if RPC takes forever in reliable communication
+		// if unreliable communication, then it automatically times out randomly somehow
+		rep = <-req.replyCh
+	} else {
+		// this case used to timeout for internal dynamo RPCs
+		select {
+		case rep = <-req.replyCh:
+			// the replpy has been received.
+		case <-time.After(time.Millisecond * time.Duration(timeout)):
+			fmt.Println("RPC: ", svcMeth, " timed out")
+			rep.ok = false
+		}
+	}
 
 	if rep.ok {
 		rb := bytes.NewBuffer(rep.reply)
@@ -229,7 +236,6 @@ func (rn *Network) isServerDead(endname interface{}, servername interface{}, ser
 
 func (rn *Network) processReq(req reqMsg) {
 	enabled, servername, server, reliable, longreordering := rn.readEndnameInfo(req.endname)
-
 	if enabled && servername != nil && server != nil {
 		if reliable == false {
 			// short delay

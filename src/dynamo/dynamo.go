@@ -4,9 +4,12 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"math/big"
+	"math/rand"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"../labrpc"
 	"github.com/DistributedClocks/GoVector/govec/vclock"
@@ -74,8 +77,19 @@ type Dynamo struct {
 	quorumR   int
 	quorumW   int
 
-	keyValue map[string]ValueField
-	prefList map[int][]int
+	keyValue                 map[string]ValueField
+	prefList                 map[int][]int
+	failureDetectionPeriodms int
+	RPCtimeout               int
+}
+
+func contains(value []int, token int) bool {
+	for _, v := range value {
+		if v == token {
+			return true
+		}
+	}
+	return false
 }
 
 func (rf *Dynamo) findCoordinator(key string) int {
@@ -88,8 +102,20 @@ func (rf *Dynamo) findCoordinator(key string) int {
 	nodeCount := big.NewInt(int64(rf.nodeCount))
 	coordNode = coordNode.Mod(bi, nodeCount)
 	coordNodeInt64 := coordNode.Int64()
-	coordNodeInt := int(coordNodeInt64)
-	return coordNodeInt
+	expectedCoordNodeInt := int(coordNodeInt64)
+	actualCoordNode := expectedCoordNodeInt
+	// check who owns this node's keys in the preference list
+
+	aliveList := rf.getListLiveNodes()
+	for i := 0; i < len(aliveList); i++ {
+		result := contains(rf.prefList[aliveList[i]], expectedCoordNodeInt)
+		if result {
+			actualCoordNode = aliveList[i]
+			break
+		}
+	}
+	DPrintfNew(InfoLevel, "route request to coord node: %v", actualCoordNode)
+	return actualCoordNode
 }
 
 // *************************** Client API ***************************
@@ -104,15 +130,16 @@ type GetReply struct {
 }
 
 func (rf *Dynamo) Get(args *GetArgs, reply *GetReply) {
+	// rf.mu.Lock()
 	coordinatorNode := rf.findCoordinator(args.Key)
-
 	if rf.me == coordinatorNode {
 		// Current dynamo node is also the correct coordinator for this request
 		// cannot put in goroutine since reply is not available synchronously!
 		rf.dynamoGet(args, reply)
 	} else {
-		rf.peers[coordinatorNode].Call("Dynamo.RouteGetToCoordinator", args, reply)
+		rf.peers[coordinatorNode].Call("Dynamo.RouteGetToCoordinator", args, reply, -1)
 	}
+	// rf.mu.Unlock()
 	return
 }
 
@@ -128,17 +155,18 @@ type PutReply struct {
 // Description: Client sent the put request to a random dynamo node.  This node must
 // identify the correct coordinator and route the request.
 func (rf *Dynamo) Put(args *PutArgs, reply *PutReply) {
+	// rf.mu.Lock()
 	DPrintfNew(InfoLevel, "Node: %v received object: args.Object: %v", rf.me, args.Object)
 	coordinatorNode := rf.findCoordinator(args.Key)
 	DPrintfNew(InfoLevel, "Put request sent from client mapped to coordinator node: %v", coordinatorNode)
-
 	if rf.me == coordinatorNode {
 		// Current dynamo node is also the correct coordinator for this request
-		go rf.dynamoPut(args, reply)
+		//go rf.dynamoPut(args, reply)
+		rf.dynamoPut(args, reply)
 	} else {
-		rf.peers[coordinatorNode].Call("Dynamo.RoutePutToCoordinator", args, reply)
+		rf.peers[coordinatorNode].Call("Dynamo.RoutePutToCoordinator", args, reply, -1)
 	}
-
+	// rf.mu.Unlock()
 	return
 }
 
@@ -181,7 +209,7 @@ func (rf *Dynamo) DynamoGetObject(args *GetArgs, dynamoReply *DynamoGetReply) {
 
 func (rf *Dynamo) requestReplicaData(ackChan chan int, index int, intendedNode int, args *GetArgs, dynamoReply *DynamoGetReply) {
 	DPrintfNew(InfoLevel, "Sending replica: %v get request", intendedNode)
-	ack := rf.peers[intendedNode].Call("Dynamo.DynamoGetObject", args, dynamoReply)
+	ack := rf.peers[intendedNode].Call("Dynamo.DynamoGetObject", args, dynamoReply, -1) // Not sure
 	if ack == true {
 		// return index that responded
 		ackChan <- index
@@ -209,12 +237,31 @@ func (rf *Dynamo) dynamoGet(args *GetArgs, reply *GetReply) {
 		dynamoReply := make([]DynamoGetReply, rf.replicas-1)
 		for i := 0; i < rf.replicas-1; i++ {
 			// To do: update to use the real-time preference list
-			intendedNode := (rf.me + i + 1) % rf.nodeCount
+
+			// To do: update to use the real-time preference list
+			// get a list of nodes which are alive
+			aliveList := rf.getListLiveNodes()
+			var myIndexAliveList int
+			if len(aliveList) < rf.quorumR {
+				// Not enough replicas to do get request!
+			} else {
+				// send the updates to the correct nodes
+				for i := 0; i < len(aliveList); i++ {
+					if aliveList[i] == rf.me {
+						myIndexAliveList = i
+						break
+					}
+				}
+			}
+			intendedNodeIndex := (myIndexAliveList + i + 1) % len(aliveList)
+			intendedNode := aliveList[intendedNodeIndex] //(rf.me + i + 1) % rf.nodeCount
+
+			// intendedNode := (rf.me + i + 1) % rf.nodeCount
 			go rf.requestReplicaData(ackChan, i, intendedNode, args, &dynamoReply[i])
 		}
 		for responseCount := 0; responseCount < rf.quorumR-1; responseCount++ {
 			index := <-ackChan
-			DPrintfNew(InfoLevel, "dynamoGet received reply from replica: %v", dynamoReply[index].NodeID)
+			DPrintfNew(InfoLevel, "dynamoGet received reply from replica: %v with value: %v", dynamoReply[index].NodeID, dynamoReply[index].Object)
 			if dynamoReply[index].Object.Data != rf.keyValue[args.Key].Data {
 				tempObject = append(tempObject, dynamoReply[index].Object.Data)
 			}
@@ -244,7 +291,8 @@ func (rf *Dynamo) DynamoPutObject(dynamoArgs *DynamoPutArgs, dynamoReply *Dynamo
 
 func (rf *Dynamo) sendReplicaData(ackChan chan int, index int, intendedNode int, args *DynamoPutArgs, dynamoReply *DynamoPutReply) {
 	DPrintfNew(InfoLevel, "Sending replica: %v put request", intendedNode)
-	ack := rf.peers[intendedNode].Call("Dynamo.DynamoPutObject", args, dynamoReply)
+	ack := rf.peers[intendedNode].Call("Dynamo.DynamoPutObject", args, dynamoReply, -1) // Not sure
+	// ack := false
 	if ack == true {
 		// return index that responded
 		ackChan <- index
@@ -283,7 +331,22 @@ func (rf *Dynamo) dynamoPut(args *PutArgs, reply *PutReply) {
 		dynamoReply := make([]DynamoPutReply, rf.replicas-1)
 		for i := 0; i < rf.replicas-1; i++ {
 			// To do: update to use the real-time preference list
-			intendedNode := (rf.me + i + 1) % rf.nodeCount
+			// get a list of nodes which are alive
+			aliveList := rf.getListLiveNodes()
+			var myIndexAliveList int
+			if len(aliveList) < rf.quorumW {
+				// Not enough replicas to do put request!
+			} else {
+				// send the updates to the correct nodes
+				for i := 0; i < len(aliveList); i++ {
+					if aliveList[i] == rf.me {
+						myIndexAliveList = i
+						break
+					}
+				}
+			}
+			intendedNodeIndex := (myIndexAliveList + i + 1) % len(aliveList)
+			intendedNode := aliveList[intendedNodeIndex] //(rf.me + i + 1) % rf.nodeCount
 			go rf.sendReplicaData(ackChan, i, intendedNode, &updatedArgs, &dynamoReply[i])
 		}
 		for responseCount := 0; responseCount < rf.quorumW-1; responseCount++ {
@@ -313,6 +376,145 @@ func (rf *Dynamo) Kill() {
 	// all loops, to avoid having dead Raft instances print confusing messages.
 }
 
+func (rf *Dynamo) killed() bool {
+	z := atomic.LoadInt32(&rf.dead)
+	return z == 1
+}
+
+type DynamoPingReply struct {
+}
+
+type DynamoPingArgs struct {
+}
+
+func (rf *Dynamo) DynamoPing(dynamoArgs *DynamoPingArgs, dynamoReply *DynamoPingReply) {
+	return
+}
+
+type DynamoUpdatePrefReply struct {
+}
+
+type DynamoUpdatePrefArgs struct {
+	UpdatedPrefList map[int][]int
+}
+
+func (rf *Dynamo) DynamoUpdatePrefList(dynamoArgs *DynamoUpdatePrefArgs, dynamoReply *DynamoUpdatePrefReply) {
+	// add the updates to our preference list
+	DPrintfNew(InfoLevel, "Node %v notified of updated prefList (before): %v", rf.me, rf.prefList)
+	for node, value := range dynamoArgs.UpdatedPrefList {
+		tmp := make([]int, len(value))
+		copy(tmp, value)
+		// rf.mu.Lock()
+		rf.prefList[node] = tmp
+		// rf.mu.Unlock()
+	}
+	DPrintfNew(InfoLevel, "Node %v prefList (after): %v", rf.me, rf.prefList)
+	return
+}
+
+func (rf *Dynamo) getListLiveNodes() []int {
+	// get a list of nodes which are alive
+	aliveList := []int{}
+	for node, valueList := range rf.prefList {
+		flagNodeIsDown := false
+		if len(valueList) == 0 {
+			flagNodeIsDown = true
+		}
+		if !flagNodeIsDown {
+			aliveList = append(aliveList, node)
+		}
+		if rf.me == node {
+			if flagNodeIsDown {
+				DPrintfNew(ErrorLevel, "I'm node %v and my pref list says I'm down", rf.me)
+			}
+		}
+	}
+	sort.Ints(aliveList)
+	return aliveList
+}
+
+func (rf *Dynamo) failureDetection() {
+	for {
+		time.Sleep(time.Duration(rf.failureDetectionPeriodms) * time.Millisecond)
+
+		if rf.killed() {
+			break
+		}
+
+		// rf.mu.Lock()
+
+		args := DynamoPingArgs{}
+		reply := DynamoPingReply{}
+
+		// get a list of nodes which are alive
+		aliveList := rf.getListLiveNodes()
+		if len(aliveList) == 1 {
+			// I'm the only alive node, so do nothing...
+		} else {
+			// ping a random node, but not ourself
+			var peerNumber int
+			for {
+				peerNumber = rand.Intn(len(aliveList))
+				peerNumber = aliveList[peerNumber]
+				if peerNumber != rf.me {
+					break
+				}
+			}
+			ack := rf.peers[peerNumber].Call("Dynamo.DynamoPing", &args, &reply, rf.RPCtimeout)
+			if !ack {
+				// update local preference list
+				for i := 1; i < rf.nodeCount; i++ {
+					intendedNode := (peerNumber + i) % rf.nodeCount
+					if len(rf.prefList[intendedNode]) != 0 {
+						// update the node with the tmp values
+						newValue := []int{}
+						newValue = append(newValue, rf.prefList[intendedNode]...)
+						newValue = append(newValue, rf.prefList[peerNumber]...)
+						rf.prefList[intendedNode] = newValue
+						rf.prefList[peerNumber] = []int{}
+						break
+					}
+				}
+
+				// send out new preference list
+				secondArgs := DynamoUpdatePrefArgs{}
+				secondReply := DynamoUpdatePrefReply{}
+				secondArgs.UpdatedPrefList = make(map[int][]int)
+				for node, value := range rf.prefList {
+					tmp := make([]int, len(value))
+					copy(tmp, value)
+					secondArgs.UpdatedPrefList[node] = tmp
+				}
+
+				// loop through all nodes that this node thinks is alive and send below RPC to them
+				for i := 0; i < rf.nodeCount; i++ {
+					if len(rf.prefList[i]) != 0 && (i != rf.me) {
+						secondAck := rf.peers[i].Call("Dynamo.DynamoUpdatePrefList", &secondArgs, &secondReply, rf.RPCtimeout)
+						if !secondAck {
+							DPrintfNew(InfoLevel, "Node %v unable to receive UpdatePrefList ack from node: %v", rf.me, i)
+						}
+					}
+				}
+
+				DPrintfNew(DebugLevel, "Node %v found a failed node: %v", rf.me, peerNumber)
+			}
+			// else {
+			// 	DPrintfNew(DebugLevel, "Node %v successfully ping'd node: %v", rf.me, peerNumber)
+			// }
+		}
+		// rf.mu.Unlock()
+	}
+}
+
+func (rf *Dynamo) doSomething() {
+	for {
+		time.Sleep(1000 * time.Millisecond)
+		if rf.killed() {
+			break
+		}
+	}
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -338,17 +540,21 @@ func Make(peers []*labrpc.ClientEnd, me int, replicaCount int, quorumR int, quor
 
 	rf.keyValue = make(map[string]ValueField)
 	rf.prefList = make(map[int][]int)
-	for i := 0; i <= rf.nodeCount; i++ {
+	for i := 0; i < rf.nodeCount; i++ {
 		rf.prefList[i] = []int{i}
 	}
 
-	// if(rf.me == rf.nodeCount){
-	// 	// for client
-	//
-	// }else{
-	// 	// launch failure detector for regular dynamo nodes
-	//
-	// }
+	// RPCtimeout must be strictly less than failure detection timeout!
+	rf.failureDetectionPeriodms = 250
+	// rf.failureDetectionPeriodms = rand.Intn(rf.nodeCount*rf.replicas)*2 + 100
+	rf.RPCtimeout = 100
+
+	if rf.me == rf.nodeCount {
+		// for client do nothing
+	} else {
+		// launch failure detector for regular dynamo nodes
+		go rf.failureDetection()
+	}
 
 	// rf.nextIndex = make([]int, len(rf.peers))
 	// rf.matchIndex = make([]int, len(rf.peers))
@@ -364,7 +570,6 @@ func Make(peers []*labrpc.ClientEnd, me int, replicaCount int, quorumR int, quor
 
 	// rand.Seed(int64(rf.me))
 	// rf.randMissedHeartbeats = uint((rand.Uint32() % 10) + uint32(6))
-	// go leaderElectionMonitoring(rf)
 
 	// initialize from state persisted before a crash
 	// rf.readPersist(persister.ReadRaftState())
