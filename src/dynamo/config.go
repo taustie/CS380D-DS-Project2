@@ -286,3 +286,84 @@ func (cfg *config) end() {
 		fmt.Printf("  %4.1f  %d %4d %7d %4d\n", t, npeers, nrpc, nbytes, ncmds)
 	}
 }
+
+func (cfg *config) putData(inputKey string, putCount int, nodeRange int, avoidNodeList []int, keyStart int, valueStart int) {
+	for i := 0; i < putCount; i++ {
+		expectedKey := keyStart + i
+		expectedValue := valueStart + i
+		keyString := fmt.Sprintf("%s%d", inputKey, expectedKey)
+		object := expectedValue
+		var context Context
+		args := PutArgs{keyString, object, context}
+		reply := PutReply{}
+		var peerNumber int
+		for {
+			peerNumber = rand.Intn(nodeRange)
+			result := contains(avoidNodeList, peerNumber)
+			if result == false {
+				break
+			}
+		}
+		rfClient := cfg.dynamoNodes[nodeRange]
+		ack := rfClient.peers[peerNumber].Call("Dynamo.Put", &args, &reply, -1)
+		if !ack {
+			cfg.t.Fatalf("Failed to receive ack from dynamo cluster on put(%s, nil, %d)", keyString, args.Object)
+		}
+	}
+}
+
+func (cfg *config) getData(inputKey string, putCount int, nodeRange int, avoidNodeList []int, keyStart int, valueStart int) {
+	for i := 0; i < putCount; i++ {
+		expectedKey := keyStart + i
+		expectedValue := valueStart + i
+		keyString := fmt.Sprintf("%s%d", inputKey, expectedKey)
+		args := GetArgs{keyString}
+		reply := GetReply{}
+		var peerNumber int
+		for {
+			peerNumber = rand.Intn(nodeRange)
+			result := contains(avoidNodeList, peerNumber)
+			if result == false {
+				break
+			}
+		}
+		rfClient := cfg.dynamoNodes[nodeRange]
+		DPrintfNew(InfoLevel, "Called Get()")
+		ack := rfClient.peers[peerNumber].Call("Dynamo.Get", &args, &reply, -1)
+		if ack == false {
+			cfg.t.Fatalf("Failed to receive ack from dynamo cluster on get(%s)", keyString)
+		}
+		if len(reply.Object) != 1 {
+			cfg.t.Fatalf("Received too many or too few return values: %d on get(%s)", len(reply.Object), keyString)
+		}
+		if reply.Object[0] != expectedValue {
+			cfg.t.Fatalf("Received a value: %d from node: %d, which does not match expected: %v", reply.Object, peerNumber, expectedValue)
+			// cfg.t.Fatalf("get(%s) returned value %d which does not match expected value %d", keyString, reply.Object[0], expectedValue)
+		}
+	}
+}
+
+func (cfg *config) checkAllAlive(nodeToInspect int) {
+	for index, value := range cfg.dynamoNodes[nodeToInspect].prefList {
+		if len(value) == 0 {
+			cfg.t.Fatalf("Node: %v detected node: %v failed even though all should be alive", nodeToInspect, index)
+		}
+	}
+}
+
+func (cfg *config) checkForFailure(nodeToInspect int, expectedFailNode int, maxWaitTimeSec int) {
+	checkFrequency := 100 // every 100 ms
+	secToMS := 1000
+	maxIterations := maxWaitTimeSec * secToMS / checkFrequency
+	iterationCount := 0
+	for {
+		if iterationCount >= maxIterations {
+			cfg.t.Fatalf("Node: %v did not detect failure at node: %v within %v seconds", nodeToInspect, expectedFailNode, maxWaitTimeSec)
+		}
+		if len(cfg.dynamoNodes[nodeToInspect].prefList[expectedFailNode]) == 0 {
+			break
+		}
+		iterationCount++
+		time.Sleep(100 * time.Millisecond)
+	}
+}
