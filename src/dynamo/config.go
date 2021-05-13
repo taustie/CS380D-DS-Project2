@@ -328,7 +328,7 @@ func (cfg *config) getData(inputKey string, putCount int, nodeRange int, avoidNo
 			}
 		}
 		rfClient := cfg.dynamoNodes[nodeRange]
-		DPrintfNew(InfoLevel, "Called Get()")
+
 		ack := rfClient.peers[peerNumber].Call("Dynamo.Get", &args, &reply, -1)
 		if ack == false {
 			cfg.t.Fatalf("Failed to receive ack from dynamo cluster on get(%s)", keyString)
