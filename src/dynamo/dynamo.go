@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"../labrpc"
+
 	"github.com/DistributedClocks/GoVector/govec/vclock"
 )
 
@@ -81,6 +82,7 @@ type Dynamo struct {
 	prefList                 map[int][]int
 	failureDetectionPeriodms int
 	RPCtimeout               int
+	ShiVizVClock             vclock.VClock
 }
 
 func contains(value []int, token int) bool {
@@ -121,25 +123,50 @@ func (rf *Dynamo) findCoordinator(key string) int {
 // *************************** Client API ***************************
 
 type GetArgs struct {
-	Key string //[]byte
+	Key    string //[]byte
+	VClock vclock.VClock
 }
 
 type GetReply struct {
 	Object  []int
 	Context Context
+	VClock  vclock.VClock
 }
 
 func (rf *Dynamo) Get(args *GetArgs, reply *GetReply) {
 	// rf.mu.Lock()
+	// Merge and Tick
+	rf.ShiVizVClock.Merge(args.VClock)
+	rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+	// Add to log
+	DPrintfNew(ShiVizLevel, "event: GetHandler\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
 	coordinatorNode := rf.findCoordinator(args.Key)
 	if rf.me == coordinatorNode {
 		// Current dynamo node is also the correct coordinator for this request
 		// cannot put in goroutine since reply is not available synchronously!
+
 		rf.dynamoGet(args, reply)
 	} else {
-		rf.peers[coordinatorNode].Call("Dynamo.RouteGetToCoordinator", args, reply, -1)
+		// Tick Node
+		rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+		// Add to args
+		args.VClock = rf.ShiVizVClock
+		// Add to log
+		DPrintfNew(ShiVizLevel, "event: RouteGetToCoordinator\thost: %v\tclock:%v", rf.me, args.VClock.ReturnVCString())
+
+		ack := rf.peers[coordinatorNode].Call("Dynamo.RouteGetToCoordinator", args, reply, -1)
+
+		if ack {
+			// Merge and Tick
+			rf.ShiVizVClock.Merge(reply.VClock)
+			rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+			// Add to log
+			DPrintfNew(ShiVizLevel, "event: RouteGetToCoordinatorAck\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
+		}
+
 	}
 	// rf.mu.Unlock()
+	reply.VClock = rf.ShiVizVClock
 	return
 }
 
@@ -147,15 +174,24 @@ type PutArgs struct {
 	Key     string //[]byte
 	Object  int
 	Context Context
+	VClock  vclock.VClock
 }
 
 type PutReply struct {
+	VClock vclock.VClock
 }
 
 // Description: Client sent the put request to a random dynamo node.  This node must
 // identify the correct coordinator and route the request.
 func (rf *Dynamo) Put(args *PutArgs, reply *PutReply) {
 	// rf.mu.Lock()
+
+	// Merge and Tick
+	rf.ShiVizVClock.Merge(args.VClock)
+	rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+	// Add to log
+	DPrintfNew(ShiVizLevel, "event: PutHandler\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
+
 	DPrintfNew(InfoLevel, "Node: %v received object: args.Object: %v", rf.me, args.Object)
 	coordinatorNode := rf.findCoordinator(args.Key)
 	DPrintfNew(InfoLevel, "Put request sent from client mapped to coordinator node: %v", coordinatorNode)
@@ -164,15 +200,38 @@ func (rf *Dynamo) Put(args *PutArgs, reply *PutReply) {
 		//go rf.dynamoPut(args, reply)
 		rf.dynamoPut(args, reply)
 	} else {
-		rf.peers[coordinatorNode].Call("Dynamo.RoutePutToCoordinator", args, reply, -1)
+		// Tick Node
+		rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+		// Add to args
+		args.VClock = rf.ShiVizVClock
+		// Add to log
+		DPrintfNew(ShiVizLevel, "event: RoutePutToCoordinator\thost: %v\tclock:%v", rf.me, args.VClock.ReturnVCString())
+		ack := rf.peers[coordinatorNode].Call("Dynamo.RoutePutToCoordinator", args, reply, -1)
+
+		if ack {
+			// Merge and Tick
+			rf.ShiVizVClock.Merge(reply.VClock)
+			rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+			// Add to log
+			DPrintfNew(ShiVizLevel, "event: RoutePutToCoordinatorAck\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
+		}
 	}
 	// rf.mu.Unlock()
+
+	reply.VClock = rf.ShiVizVClock
 	return
 }
 
 // *************************** Dynamo API ***************************
 
 func (rf *Dynamo) RouteGetToCoordinator(args *GetArgs, reply *GetReply) {
+
+	// Merge and Tick
+	rf.ShiVizVClock.Merge(args.VClock)
+	rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+	// Add to log
+	DPrintfNew(ShiVizLevel, "event: RouteGetToCoordinatorHandler\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
+
 	DPrintfNew(InfoLevel, "Reached RouteGetToCoordinator")
 	// verify this node is the coorect coordinator
 	coordinatorNode := rf.findCoordinator(args.Key)
@@ -186,6 +245,13 @@ func (rf *Dynamo) RouteGetToCoordinator(args *GetArgs, reply *GetReply) {
 }
 
 func (rf *Dynamo) RoutePutToCoordinator(args *PutArgs, reply *PutReply) {
+
+	// Merge and Tick
+	rf.ShiVizVClock.Merge(args.VClock)
+	rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+	// Add to log
+	DPrintfNew(ShiVizLevel, "event: RoutePutToCoordinatorHandler\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
+
 	DPrintfNew(InfoLevel, "Reached RoutePutToCoordinator")
 	// verify this node is the coorect coordinator
 	coordinatorNode := rf.findCoordinator(args.Key)
@@ -194,25 +260,52 @@ func (rf *Dynamo) RoutePutToCoordinator(args *PutArgs, reply *PutReply) {
 		return
 	}
 	rf.dynamoPut(args, reply)
+	reply.VClock = rf.ShiVizVClock
 	return
 }
 
 type DynamoGetReply struct {
 	NodeID int
 	Object ValueField
+	VClock vclock.VClock
 }
 
 func (rf *Dynamo) DynamoGetObject(args *GetArgs, dynamoReply *DynamoGetReply) {
+
+	// Merge and Tick
+	rf.ShiVizVClock.Merge(args.VClock)
+	rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+	// Add to log
+	DPrintfNew(ShiVizLevel, "event: GetObjectHandler\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
+
 	dynamoReply.NodeID = rf.me
 	dynamoReply.Object = rf.keyValue[args.Key]
+	dynamoReply.VClock = rf.ShiVizVClock.Copy()
 }
 
 func (rf *Dynamo) requestReplicaData(ackChan chan int, index int, intendedNode int, args *GetArgs, dynamoReply *DynamoGetReply) {
 	DPrintfNew(InfoLevel, "Sending replica: %v get request", intendedNode)
+	rf.mu.Lock()
+	// Tick Node
+	rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+	// Add to args
+	args.VClock = rf.ShiVizVClock.Copy()
+	// Add to log
+	DPrintfNew(ShiVizLevel, "event: GetObject\thost: %v\tclock:%v", rf.me, args.VClock.ReturnVCString())
+	rf.mu.Unlock()
+
 	ack := rf.peers[intendedNode].Call("Dynamo.DynamoGetObject", args, dynamoReply, -1) // Not sure
 	if ack == true {
 		// return index that responded
+		rf.mu.Lock()
+		// Merge and Tick
+		rf.ShiVizVClock.Merge(dynamoReply.VClock)
+		rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+		// Add to log
+		DPrintfNew(ShiVizLevel, "event: DynamoGetObjectAck\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
+
 		ackChan <- index
+		rf.mu.Unlock()
 	} else {
 		// this node did not reply and can print timeout msg
 	}
@@ -228,7 +321,7 @@ func (rf *Dynamo) dynamoGet(args *GetArgs, reply *GetReply) {
 	tempVectorTimestamp := rf.keyValue[args.Key].Timestamp
 
 	if readCount < rf.quorumR {
-
+		replicaGetArgs := GetArgs{args.Key, args.VClock.Copy()}
 		// Waiting for a subset of go routines to complete
 		// Use https://stackoverflow.com/questions/52227954/waitgroup-on-subset-of-go-routines
 
@@ -257,10 +350,11 @@ func (rf *Dynamo) dynamoGet(args *GetArgs, reply *GetReply) {
 			intendedNode := aliveList[intendedNodeIndex] //(rf.me + i + 1) % rf.nodeCount
 
 			// intendedNode := (rf.me + i + 1) % rf.nodeCount
-			go rf.requestReplicaData(ackChan, i, intendedNode, args, &dynamoReply[i])
+			go rf.requestReplicaData(ackChan, i, intendedNode, &replicaGetArgs, &dynamoReply[i])
 		}
 		for responseCount := 0; responseCount < rf.quorumR-1; responseCount++ {
 			index := <-ackChan
+			reply.VClock = rf.ShiVizVClock
 			DPrintfNew(InfoLevel, "dynamoGet received reply from replica: %v with value: %v", dynamoReply[index].NodeID, dynamoReply[index].Object)
 			if dynamoReply[index].Object.Data != rf.keyValue[args.Key].Data {
 				tempObject = append(tempObject, dynamoReply[index].Object.Data)
@@ -276,26 +370,53 @@ func (rf *Dynamo) dynamoGet(args *GetArgs, reply *GetReply) {
 
 type DynamoPutReply struct {
 	NodeID int
+	VClock vclock.VClock
 }
 
 type DynamoPutArgs struct {
 	Key    string
 	Object ValueField
+	VClock vclock.VClock
 }
 
 func (rf *Dynamo) DynamoPutObject(dynamoArgs *DynamoPutArgs, dynamoReply *DynamoPutReply) {
 	dynamoReply.NodeID = rf.me
 	// To do: check vector timestamps before writing it to know if need to preserve the data
+
+	// Merge and Tick
+	rf.ShiVizVClock.Merge(dynamoArgs.VClock)
+	rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+	// Add to log
+	DPrintfNew(ShiVizLevel, "event: DynamoPutObjectHandler\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
+
 	rf.keyValue[dynamoArgs.Key] = dynamoArgs.Object
+	dynamoReply.VClock = rf.ShiVizVClock.Copy()
 }
 
 func (rf *Dynamo) sendReplicaData(ackChan chan int, index int, intendedNode int, args *DynamoPutArgs, dynamoReply *DynamoPutReply) {
 	DPrintfNew(InfoLevel, "Sending replica: %v put request", intendedNode)
+	rf.mu.Lock()
+	// Tick Node
+	rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+	// Add to args
+	args.VClock = rf.ShiVizVClock.Copy()
+	// Add to log
+	DPrintfNew(ShiVizLevel, "event: DynamoPutObject\thost: %v\tclock:%v", rf.me, args.VClock.ReturnVCString())
+	rf.mu.Unlock()
+
 	ack := rf.peers[intendedNode].Call("Dynamo.DynamoPutObject", args, dynamoReply, -1) // Not sure
 	// ack := false
 	if ack == true {
 		// return index that responded
+		rf.mu.Lock()
+		// Merge and Tick
+		rf.ShiVizVClock.Merge(dynamoReply.VClock)
+		rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+		// Add to log
+		DPrintfNew(ShiVizLevel, "event: DynamoPutObjectAck\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
+
 		ackChan <- index
+		rf.mu.Unlock()
 	} else {
 		// this node did not reply and can print timeout msg
 	}
@@ -316,6 +437,10 @@ func (rf *Dynamo) dynamoPut(args *PutArgs, reply *PutReply) {
 		meString := strconv.Itoa(rf.me)
 		value.Timestamp.Set(meString, 1)
 		rf.keyValue[args.Key] = value
+
+		rf.ShiVizVClock.Tick(strconv.Itoa(rf.me))
+		// Add to log
+		DPrintfNew(ShiVizLevel, "event: DynamoPutObjectSelf\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
 	}
 
 	writeCount := 1
@@ -323,13 +448,14 @@ func (rf *Dynamo) dynamoPut(args *PutArgs, reply *PutReply) {
 		// Waiting for a subset of go routines to complete
 		// Use https://stackoverflow.com/questions/52227954/waitgroup-on-subset-of-go-routines
 
-		updatedArgs := DynamoPutArgs{}
-		updatedArgs.Key = args.Key
-		updatedArgs.Object = value
 		// buffered channel up to read quorum - 1 returns
 		ackChan := make(chan int, rf.quorumW-1)
 		dynamoReply := make([]DynamoPutReply, rf.replicas-1)
 		for i := 0; i < rf.replicas-1; i++ {
+			updatedArgs := DynamoPutArgs{}
+			updatedArgs.Key = args.Key
+			updatedArgs.Object.Data = value.Data
+			updatedArgs.Object.Timestamp = value.Timestamp.Copy()
 			// To do: update to use the real-time preference list
 			// get a list of nodes which are alive
 			aliveList := rf.getListLiveNodes()
@@ -351,6 +477,7 @@ func (rf *Dynamo) dynamoPut(args *PutArgs, reply *PutReply) {
 		}
 		for responseCount := 0; responseCount < rf.quorumW-1; responseCount++ {
 			index := <-ackChan
+			reply.VClock = rf.ShiVizVClock
 			DPrintfNew(InfoLevel, "dynamoPut received reply from replica: %v", dynamoReply[index].NodeID)
 		}
 	}
@@ -396,6 +523,7 @@ type DynamoUpdatePrefReply struct {
 
 type DynamoUpdatePrefArgs struct {
 	UpdatedPrefList map[int][]int
+	VClock          vclock.VClock
 }
 
 func (rf *Dynamo) DynamoUpdatePrefList(dynamoArgs *DynamoUpdatePrefArgs, dynamoReply *DynamoUpdatePrefReply) {
@@ -540,6 +668,7 @@ func Make(peers []*labrpc.ClientEnd, me int, replicaCount int, quorumR int, quor
 
 	rf.keyValue = make(map[string]ValueField)
 	rf.prefList = make(map[int][]int)
+	rf.ShiVizVClock = vclock.New()
 	for i := 0; i < rf.nodeCount; i++ {
 		rf.prefList[i] = []int{i}
 	}

@@ -1,0 +1,7 @@
+(?<date>\d{4}/\d{2}/\d{2} (\d{2}:){2}\d{2}) ShiViz:\s+event:\s+(?<event>.*)\s+host: (?<host>[^\s]*)\s+clock:(?<clock>{.*})
+
+2021/05/13 16:09:14 ShiViz: event: Put  host: Client    clock:{"Client":1}
+2021/05/13 16:09:14 ShiViz: event: PutHandler   host: 4 clock:{"Client":1, "4":1}
+2021/05/13 16:09:14 ShiViz: event: Put  host: Client    clock:{"Client":2}
+2021/05/13 16:09:14 ShiViz: event: PutHandler   host: 8 clock:{"Client":2, "8":1}
+

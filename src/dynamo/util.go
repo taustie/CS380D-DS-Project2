@@ -6,11 +6,12 @@ import (
 )
 
 // Debugging
-const Debug = InfoLevel
+const Debug = ShiVizLevel
 
 // Enumerated lookup for log level type
 const (
 	None = iota
+	ShiVizLevel
 	InfoLevel
 	NoticeLevel
 	DebugLevel
@@ -20,6 +21,7 @@ const (
 
 // Configure the color suffix and prefix for each log level
 const (
+	ShiVizColor  = "ShiViz:\t%s"
 	InfoColor    = "\033[1;34mInfo:\t%s\033[0m"
 	NoticeColor  = "\033[1;36mNotice:\t%s\033[0m"
 	DebugColor   = "\033[0;36mDebug:\t%s\033[0m"
@@ -29,6 +31,10 @@ const (
 
 func DPrintfNew(logLevel int, format string, a ...interface{}) (n int, err error) {
 	if (logLevel >= Debug) && (Debug > None) {
+		if logLevel == ShiVizLevel {
+			output := fmt.Sprintf(ShiVizColor, format)
+			log.Printf(output, a...)
+		}
 		if logLevel == InfoLevel {
 			output := fmt.Sprintf(InfoColor, format)
 			log.Printf(output, a...)
