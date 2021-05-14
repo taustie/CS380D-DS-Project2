@@ -164,7 +164,10 @@ func TestNormalUpdatesMaxQuorum2B(t *testing.T) {
 		expectedKey := keyStart + i
 		expectedValue := valueStart + i
 		keyString := fmt.Sprintf("%s%d", inputKey, expectedKey)
-		args := GetArgs{keyString}
+		// Tick Node
+		rfClient := cfg.dynamoNodes[nodes]
+		rfClient.ShiVizVClock.Tick("Client")
+		args := GetArgs{keyString, rfClient.ShiVizVClock}
 		reply := GetReply{}
 		var peerNumber int
 		for {
@@ -174,12 +177,15 @@ func TestNormalUpdatesMaxQuorum2B(t *testing.T) {
 				break
 			}
 		}
-		rfClient := cfg.dynamoNodes[nodes]
-
+		DPrintfNew(ShiVizLevel, "event: Get\thost: %v\tclock:%v", "Client", args.VClock.ReturnVCString())
 		ack := rfClient.peers[peerNumber].Call("Dynamo.Get", &args, &reply, -1)
 		if ack == false {
 			cfg.t.Fatalf("Failed to receive ack from dynamo cluster on get(%s)", keyString)
 		}
+		// Merge and Tick
+		rfClient.ShiVizVClock.Merge(reply.VClock)
+		rfClient.ShiVizVClock.Tick("Client")
+		DPrintfNew(ShiVizLevel, "event: GetAck\thost: %v\tclock:%v", "Client", rfClient.ShiVizVClock.ReturnVCString())
 		if len(reply.Object) != 1 {
 			cfg.t.Fatalf("Received too many or too few return values: %d on get(%s)", len(reply.Object), keyString)
 		}
@@ -207,7 +213,9 @@ func TestNormalUpdatesMaxQuorum2B(t *testing.T) {
 		var context Context
 		// alternatively use latest context
 		// context := returnedContext[i]
-		args := PutArgs{keyString, object, context}
+		rfClient := cfg.dynamoNodes[nodes]
+		rfClient.ShiVizVClock.Tick("Client")
+		args := PutArgs{keyString, object, context, rfClient.ShiVizVClock}
 		reply := PutReply{}
 		var peerNumber int
 		for {
@@ -217,11 +225,16 @@ func TestNormalUpdatesMaxQuorum2B(t *testing.T) {
 				break
 			}
 		}
-		rfClient := cfg.dynamoNodes[nodes]
+		DPrintfNew(ShiVizLevel, "event: Put\thost: %v\tclock:%v", "Client", args.VClock.ReturnVCString())
 		ack := rfClient.peers[peerNumber].Call("Dynamo.Put", &args, &reply, -1)
 		if !ack {
 			cfg.t.Fatalf("Failed to receive ack from dynamo cluster on put(%s, nil, %d)", keyString, args.Object)
 		}
+		// Merge and Tick
+		rfClient.ShiVizVClock.Merge(reply.VClock)
+		rfClient.ShiVizVClock.Tick("Client")
+		// Add to log
+		DPrintfNew(ShiVizLevel, "event: PutAck\thost: %v\tclock:%v", "Client", rfClient.ShiVizVClock.ReturnVCString())
 	}
 
 	// ********************* round 4: verify round 3 updates applied and the context info is up to date *********************
@@ -229,7 +242,10 @@ func TestNormalUpdatesMaxQuorum2B(t *testing.T) {
 		expectedKey := keyStart + i
 		expectedValue := valueStart + i
 		keyString := fmt.Sprintf("%s%d", inputKey, expectedKey)
-		args := GetArgs{keyString}
+		// Tick Node
+		rfClient := cfg.dynamoNodes[nodes]
+		rfClient.ShiVizVClock.Tick("Client")
+		args := GetArgs{keyString, rfClient.ShiVizVClock}
 		reply := GetReply{}
 		var peerNumber int
 		for {
@@ -239,12 +255,15 @@ func TestNormalUpdatesMaxQuorum2B(t *testing.T) {
 				break
 			}
 		}
-		rfClient := cfg.dynamoNodes[nodes]
-
+		DPrintfNew(ShiVizLevel, "event: Get\thost: %v\tclock:%v", "Client", args.VClock.ReturnVCString())
 		ack := rfClient.peers[peerNumber].Call("Dynamo.Get", &args, &reply, -1)
 		if ack == false {
 			cfg.t.Fatalf("Failed to receive ack from dynamo cluster on get(%s)", keyString)
 		}
+		// Merge and Tick
+		rfClient.ShiVizVClock.Merge(reply.VClock)
+		rfClient.ShiVizVClock.Tick("Client")
+		DPrintfNew(ShiVizLevel, "event: GetAck\thost: %v\tclock:%v", "Client", rfClient.ShiVizVClock.ReturnVCString())
 		if len(reply.Object) != 1 {
 			cfg.t.Fatalf("Received too many or too few return values: %d on get(%s)", len(reply.Object), keyString)
 		}
