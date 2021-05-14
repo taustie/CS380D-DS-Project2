@@ -294,7 +294,11 @@ func (cfg *config) putData(inputKey string, putCount int, nodeRange int, avoidNo
 		keyString := fmt.Sprintf("%s%d", inputKey, expectedKey)
 		object := expectedValue
 		var context Context
-		args := PutArgs{keyString, object, context}
+		// Tick Node
+		rfClient := cfg.dynamoNodes[nodeRange]
+		rfClient.ShiVizVClock.Tick("Client")
+		// Add to args
+		args := PutArgs{keyString, object, context, rfClient.ShiVizVClock}
 		reply := PutReply{}
 		var peerNumber int
 		for {
@@ -304,11 +308,16 @@ func (cfg *config) putData(inputKey string, putCount int, nodeRange int, avoidNo
 				break
 			}
 		}
-		rfClient := cfg.dynamoNodes[nodeRange]
+		DPrintfNew(ShiVizLevel, "event: Put\thost: %v\tclock:%v", "Client", args.VClock.ReturnVCString())
 		ack := rfClient.peers[peerNumber].Call("Dynamo.Put", &args, &reply, -1)
 		if !ack {
 			cfg.t.Fatalf("Failed to receive ack from dynamo cluster on put(%s, nil, %d)", keyString, args.Object)
 		}
+		// Merge and Tick
+		rfClient.ShiVizVClock.Merge(reply.VClock)
+		rfClient.ShiVizVClock.Tick("Client")
+		// Add to log
+		DPrintfNew(ShiVizLevel, "event: PutAck\thost: %v\tclock:%v", "Client", rfClient.ShiVizVClock.ReturnVCString())
 	}
 }
 
@@ -317,7 +326,11 @@ func (cfg *config) getData(inputKey string, putCount int, nodeRange int, avoidNo
 		expectedKey := keyStart + i
 		expectedValue := valueStart + i
 		keyString := fmt.Sprintf("%s%d", inputKey, expectedKey)
-		args := GetArgs{keyString}
+		// Tick Node
+		rfClient := cfg.dynamoNodes[nodeRange]
+		rfClient.ShiVizVClock.Tick("Client")
+		// Add to args
+		args := GetArgs{keyString, rfClient.ShiVizVClock}
 		reply := GetReply{}
 		var peerNumber int
 		for {
@@ -327,12 +340,15 @@ func (cfg *config) getData(inputKey string, putCount int, nodeRange int, avoidNo
 				break
 			}
 		}
-		rfClient := cfg.dynamoNodes[nodeRange]
-
+		DPrintfNew(ShiVizLevel, "event: Get\thost: %v\tclock:%v", "Client", args.VClock.ReturnVCString())
 		ack := rfClient.peers[peerNumber].Call("Dynamo.Get", &args, &reply, -1)
 		if ack == false {
 			cfg.t.Fatalf("Failed to receive ack from dynamo cluster on get(%s)", keyString)
 		}
+		// Merge and Tick
+		rfClient.ShiVizVClock.Merge(reply.VClock)
+		rfClient.ShiVizVClock.Tick("Client")
+		DPrintfNew(ShiVizLevel, "event: GetAck\thost: %v\tclock:%v", "Client", rfClient.ShiVizVClock.ReturnVCString())
 		if len(reply.Object) != 1 {
 			cfg.t.Fatalf("Received too many or too few return values: %d on get(%s)", len(reply.Object), keyString)
 		}
