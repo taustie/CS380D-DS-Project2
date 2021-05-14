@@ -1,8 +1,10 @@
 package dynamo
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/hex"
+	"fmt"
 	"math/big"
 	"math/rand"
 	"sort"
@@ -77,7 +79,7 @@ type Dynamo struct {
 	quorumR   int
 	quorumW   int
 
-	keyValue                 map[string]ValueField
+	keyValue                 map[string][]ValueField
 	prefList                 map[int][]int
 	failureDetectionPeriodms int
 	RPCtimeout               int
@@ -116,6 +118,22 @@ func contains(value []int, token int) bool {
 		}
 	}
 	return false
+}
+
+func (rf *Dynamo) findDefaultCoordinator(key string) int {
+	// perform the hash to determine the expected coordinator node
+	bi := big.NewInt(0)
+	keyBytes := []byte(key)
+	output := md5.Sum(keyBytes)
+	hexstr := hex.EncodeToString(output[:])
+	bi.SetString(hexstr, 16)
+	coordNode := new(big.Int)
+	nodeCount := big.NewInt(int64(rf.nodeCount))
+	coordNode = coordNode.Mod(bi, nodeCount)
+	coordNodeInt64 := coordNode.Int64()
+	expectedCoordNodeInt := int(coordNodeInt64)
+	actualCoordNode := expectedCoordNodeInt
+	return actualCoordNode
 }
 
 func (rf *Dynamo) findCoordinator(key string) int {
@@ -165,18 +183,34 @@ func (rf *Dynamo) getListLiveNodes() []int {
 	return aliveList
 }
 
-func (rf *Dynamo) coordinatorApplyPut(args *PutArgs, reply *PutReply) {
-	value, exists := rf.keyValue[args.Key]
-	if exists {
-		// to do: handle case of updating an existing key
+// type PutArgs struct {
+// 	Key     string //[]byte
+// 	Object  int
+// 	Context Context
+// }
 
-	} else {
-		value = ValueField{}
+func (rf *Dynamo) coordinatorApplyPut(args *PutArgs, reply *PutReply) {
+	if len(rf.keyValue[args.Key]) == 1 {
+		// one data entry already present
+		rf.keyValue[args.Key][0].Data = args.Object
+		meString := strconv.Itoa(rf.me)
+		rf.keyValue[args.Key][0].Timestamp.Tick(meString)
+		DPrintfNew(NoticeLevel, "Coord existing value already present on put.  New vector clock value is: %v", rf.keyValue[args.Key])
+	} else if len(rf.keyValue[args.Key]) == 0 {
+		// no entry present
+		value := ValueField{}
 		value.Data = args.Object
 		value.Timestamp = vclock.New()
 		meString := strconv.Itoa(rf.me)
 		value.Timestamp.Set(meString, 1)
-		rf.keyValue[args.Key] = value
+		rf.keyValue[args.Key] = append(rf.keyValue[args.Key], value)
+	} else {
+		// More than one entry already present
+		// multiple concurrent values to comb through for the correct context
+		DPrintfNew(ErrorLevel, "Multiple concurrent values, and no logic to choose the one to update")
+		rf.keyValue[args.Key][0].Data = args.Object
+		meString := strconv.Itoa(rf.me)
+		rf.keyValue[args.Key][0].Timestamp.Tick(meString)
 	}
 }
 
@@ -184,7 +218,15 @@ func (rf *Dynamo) coordinatorApplyPut(args *PutArgs, reply *PutReply) {
 func (rf *Dynamo) dynamoPut(args *PutArgs, reply *PutReply) {
 	// apply the request to the current dynamo node
 	rf.coordinatorApplyPut(args, reply)
-	value := rf.keyValue[args.Key]
+
+	var value ValueField
+	if len(rf.keyValue[args.Key]) == 1 {
+		value = rf.keyValue[args.Key][0]
+	} else {
+		DPrintfNew(ErrorLevel, "Multiple concurrent values, and no logic to choose the one to update")
+		value = rf.keyValue[args.Key][0]
+	}
+
 	writeCount := 1
 
 	// put the data on a write quorum of replicas
@@ -226,11 +268,43 @@ func (rf *Dynamo) dynamoPut(args *PutArgs, reply *PutReply) {
 	}
 }
 
+//ReturnVCString returns a string encoding of a vector clock
+func ReturnVCStringSorted(vc *vclock.VClock) string {
+	//sort
+	ids := make([]string, len(*vc))
+	i := 0
+	for id := range *vc {
+		ids[i] = id
+		i++
+	}
+
+	sort.Strings(ids)
+
+	var buffer bytes.Buffer
+	buffer.WriteString("{")
+	for i := range ids {
+		buffer.WriteString(fmt.Sprintf("\"%s\":%d", ids[i], (*vc)[ids[i]]))
+		if i+1 < len(ids) {
+			buffer.WriteString(", ")
+		}
+	}
+	buffer.WriteString("}")
+	return buffer.String()
+}
+
 func (rf *Dynamo) dynamoGet(args *GetArgs, reply *GetReply) {
 	readCount := 1
-	tempObject := make([]int, 0)
-	tempObject = append(tempObject, rf.keyValue[args.Key].Data)
-	tempVectorTimestamp := rf.keyValue[args.Key].Timestamp
+	ObjectFrequency := make(map[string]int)
+	ObjectPtr := make(map[string]*ValueField)
+	for index, value := range rf.keyValue[args.Key] {
+		vcString := ReturnVCStringSorted(&value.Timestamp)
+		ObjectFrequency[vcString]++
+		ObjectPtr[vcString] = &(rf.keyValue[args.Key][index])
+	}
+
+	tempObject := []int{}
+	tempVectorTimestamp := vclock.New()
+	dynamoReply := make([]DynamoGetReply, rf.replicas-1)
 
 	if readCount < rf.quorumR {
 		// Waiting for a subset of go routines to complete
@@ -238,7 +312,6 @@ func (rf *Dynamo) dynamoGet(args *GetArgs, reply *GetReply) {
 
 		// buffered channel up to read quorum - 1 returns
 		ackChan := make(chan int, rf.quorumR-1)
-		dynamoReply := make([]DynamoGetReply, rf.replicas-1)
 		for i := 0; i < rf.replicas-1; i++ {
 			// Replicas are chose based on real-time preference list
 			aliveList := rf.getListLiveNodes()
@@ -260,19 +333,40 @@ func (rf *Dynamo) dynamoGet(args *GetArgs, reply *GetReply) {
 		}
 		for responseCount := 0; responseCount < rf.quorumR-1; responseCount++ {
 			index := <-ackChan
-			DPrintfNew(InfoLevel, "Coordinator: %v received ack from replica: %v on get request with value: %v", rf.me, dynamoReply[index].NodeID, dynamoReply[index].Object)
-			if dynamoReply[index].Object.Data != rf.keyValue[args.Key].Data {
-				// To do: conflict resolution here on coordinator node.
-				// currently blindly compiling results
-				tempObject = append(tempObject, dynamoReply[index].Object.Data)
+			DPrintfNew(InfoLevel, "Coordinator: %v received ack from replica: %v on get request with value: %v", rf.me, dynamoReply[index].NodeID, dynamoReply[index])
+			for objectIndex, value := range dynamoReply[index].Object {
+				vcString := ReturnVCStringSorted(&value.Timestamp)
+				ObjectFrequency[vcString]++
+				ObjectPtr[vcString] = &(dynamoReply[index].Object[objectIndex])
 			}
 		}
 	}
 
+	// do conflict resolution
+	for key, value := range ObjectFrequency {
+		if value >= rf.quorumR {
+			tempObject = append(tempObject, ObjectPtr[key].Data)
+			tempVectorTimestamp.Merge(ObjectPtr[key].Timestamp)
+		}
+	}
+
 	reply.Object = tempObject
-	reply.Context.VectorTimestamp = tempVectorTimestamp
+	reply.Context.VectorTimestamp = tempVectorTimestamp.Copy()
+	reply.Context.IntendedNode = rf.findDefaultCoordinator(args.Key)
+
+	DPrintfNew(NoticeLevel, "Get about to reply with: %v", reply)
 	return
 }
+
+// type GetReply struct {
+// 	Object  []int
+// 	Context Context
+// }
+
+// type DynamoGetReply struct {
+// 	NodeID int
+// 	Object []ValueField
+// }
 
 // *************************** Dynamo API ***************************
 
@@ -303,12 +397,14 @@ func (rf *Dynamo) RoutePutToCoordinator(args *PutArgs, reply *PutReply) {
 
 type DynamoGetReply struct {
 	NodeID int
-	Object ValueField
+	Object []ValueField
 }
 
 func (rf *Dynamo) DynamoGetObject(args *GetArgs, dynamoReply *DynamoGetReply) {
 	dynamoReply.NodeID = rf.me
-	dynamoReply.Object = rf.keyValue[args.Key]
+	// dynamoReply.Object = rf.keyValue[args.Key]
+	dynamoReply.Object = make([]ValueField, len(rf.keyValue[args.Key]))
+	copy(dynamoReply.Object, rf.keyValue[args.Key])
 }
 
 func (rf *Dynamo) requestReplicaData(ackChan chan int, index int, replicaNode int, args *GetArgs, dynamoReply *DynamoGetReply) {
@@ -334,15 +430,24 @@ type DynamoPutArgs struct {
 func (rf *Dynamo) ReplicaPutObject(dynamoArgs *DynamoPutArgs, dynamoReply *DynamoPutReply) {
 	dynamoReply.NodeID = rf.me
 
-	_, exists := rf.keyValue[dynamoArgs.Key]
-	if exists {
-		// to do: handle case of updating an existing key
-		// To do: check vector timestamps before writing it to know if need to preserve the data
+	if len(rf.keyValue[dynamoArgs.Key]) == 1 {
+		// one data entry already present
+		rf.keyValue[dynamoArgs.Key][0].Data = dynamoArgs.Object.Data
+		rf.keyValue[dynamoArgs.Key][0].Timestamp = dynamoArgs.Object.Timestamp.Copy()
+		DPrintfNew(NoticeLevel, "Replica existing value already present on put.  New vector clock value is: %v", rf.keyValue[dynamoArgs.Key])
+	} else if len(rf.keyValue[dynamoArgs.Key]) == 0 {
+		// no entry present
+		newField := ValueField{}
+		newField.Data = dynamoArgs.Object.Data
+		newField.Timestamp = dynamoArgs.Object.Timestamp.Copy()
+		rf.keyValue[dynamoArgs.Key] = append(rf.keyValue[dynamoArgs.Key], newField)
 	} else {
-
-		rf.keyValue[dynamoArgs.Key] = dynamoArgs.Object
+		// More than one entry already present
+		// multiple concurrent values to comb through for the correct context
+		DPrintfNew(ErrorLevel, "Multiple concurrent values, and no logic to choose the one to update")
+		rf.keyValue[dynamoArgs.Key][0].Data = dynamoArgs.Object.Data
+		rf.keyValue[dynamoArgs.Key][0].Timestamp = dynamoArgs.Object.Timestamp.Copy()
 	}
-
 }
 
 func (rf *Dynamo) sendReplicaData(ackChan chan int, index int, replicaNode int, args *DynamoPutArgs, dynamoReply *DynamoPutReply) {
@@ -479,7 +584,7 @@ func Make(peers []*labrpc.ClientEnd, me int, replicaCount int, quorumR int, quor
 	rf.quorumR = quorumR
 	rf.quorumW = quorumW
 
-	rf.keyValue = make(map[string]ValueField)
+	rf.keyValue = make(map[string][]ValueField)
 	rf.prefList = make(map[int][]int)
 	for i := 0; i < rf.nodeCount; i++ {
 		rf.prefList[i] = []int{i}
