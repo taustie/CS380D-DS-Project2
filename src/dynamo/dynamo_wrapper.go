@@ -26,6 +26,14 @@ func (rf *Dynamo) Get(args *GetArgs, reply *GetReply) {
 	// Add to log
 	DPrintfNew(ShiVizLevel, "event: GetHandler\thost: %v\tclock:%v", rf.me, rf.ShiVizVClock.ReturnVCString())
 	coordinatorNode := rf.findCoordinator(args.Key)
+	defaultCoordinator := rf.findDefaultCoordinator(args.Key)
+	if coordinatorNode != defaultCoordinator {
+		// the deafult coordinator must not be available!
+		// ping to confirm
+		rf.performPingAndUpdate(defaultCoordinator, false)
+		// time.Sleep(100 * time.Millisecond)
+		coordinatorNode = rf.findCoordinator(args.Key)
+	}
 	if rf.me == coordinatorNode {
 		// Current dynamo node is also the correct coordinator for this request
 		// cannot put in goroutine since reply is not available synchronously!

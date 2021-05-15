@@ -545,17 +545,204 @@ type DynamoUpdatePrefArgs struct {
 
 func (rf *Dynamo) DynamoUpdatePrefList(dynamoArgs *DynamoUpdatePrefArgs, dynamoReply *DynamoUpdatePrefReply) {
 	// add the updates to our preference list
-	DPrintfNew(InfoLevel, "Node %v notified of updated prefList (before): %v", rf.me, rf.prefList)
+	// DPrintfNew(WarningLevel, "Node %v notified of updated prefList (before): %v", rf.me, rf.prefList)
+
+	// send to the revived coordinator/replica all the latest data (reach consistent state)
 	for node, value := range dynamoArgs.UpdatedPrefList {
 		tmp := make([]int, len(value))
 		copy(tmp, value)
+		rf.mu.Lock()
 		rf.prefList[node] = tmp
+		rf.mu.Unlock()
 	}
-	DPrintfNew(InfoLevel, "Node %v prefList (after): %v", rf.me, rf.prefList)
+	// DPrintfNew(WarningLevel, "Node %v prefList (after): %v", rf.me, rf.prefList)
 	return
 }
 
+type DynamoRequestToSendKVReply struct {
+}
+
+type DynamoRequestToSendKVArgs struct {
+	RevivedNode int
+}
+
+func (rf *Dynamo) DynamoRequestToSendKV(dynamoArgs *DynamoRequestToSendKVArgs, dynamoReply *DynamoRequestToSendKVReply) {
+	sendReply := DynamoSendKVReply{}
+	sendArgs := DynamoSendKVArgs{rf.keyValue}
+	ack := rf.peers[dynamoArgs.RevivedNode].Call("Dynamo.DynamoSendKV", &sendArgs, &sendReply, rf.RPCtimeout)
+	if !ack {
+		DPrintfNew(ErrorLevel, "Node %v unable to receive DynamoSendKV ack from node: %v", rf.me, dynamoArgs.RevivedNode)
+	}
+}
+
+type DynamoSendKVReply struct {
+}
+
+type DynamoSendKVArgs struct {
+	SentKeyValue map[string][]ValueField
+}
+
+func (rf *Dynamo) DynamoSendKV(dynamoArgs *DynamoSendKVArgs, dynamoReply *DynamoSendKVReply) {
+	rf.mu.Lock()
+	for key, _ := range dynamoArgs.SentKeyValue {
+		for i := 0; i < rf.replicas; i++ {
+			if ((rf.findDefaultCoordinator(key) + i) % rf.nodeCount) == rf.me {
+				if len(dynamoArgs.SentKeyValue[key]) == 1 {
+					if len(rf.keyValue[key]) == 1 {
+						concurrent := rf.keyValue[key][0].Timestamp.Compare(dynamoArgs.SentKeyValue[key][0].Timestamp, vclock.Concurrent)
+						descendant := rf.keyValue[key][0].Timestamp.Compare(dynamoArgs.SentKeyValue[key][0].Timestamp, vclock.Descendant)
+						equal := rf.keyValue[key][0].Timestamp.Compare(dynamoArgs.SentKeyValue[key][0].Timestamp, vclock.Equal)
+						if concurrent && !equal {
+							DPrintfNew(InfoLevel, "rf.keyValue[%v]: %v, dynamoArgs.SentKeyValue[%v]: %v", key, rf.keyValue[key], key, dynamoArgs.SentKeyValue[key])
+							DPrintfNew(InfoLevel, "Must apply concurrent update")
+							rf.keyValue[key] = append(rf.keyValue[key], dynamoArgs.SentKeyValue[key][0])
+						} else if descendant {
+							rf.keyValue[key][0].Data = dynamoArgs.SentKeyValue[key][0].Data
+							rf.keyValue[key][0].Timestamp = dynamoArgs.SentKeyValue[key][0].Timestamp
+						}
+					} else if len(rf.keyValue[key]) == 0 {
+						rf.keyValue[key] = append(rf.keyValue[key], dynamoArgs.SentKeyValue[key][0])
+					} else {
+						// More than one entry already present
+						// multiple concurrent values to comb through for the correct context
+						DPrintfNew(ErrorLevel, "Multiple concurrent values, and no logic to choose the one to update")
+						DPrintfNew(ErrorLevel, "rf.keyValue[%v]: %v", key, rf.keyValue[key])
+					}
+				} else if len(dynamoArgs.SentKeyValue[key]) > 1 {
+					// More than one entry already present
+					// multiple concurrent values to comb through for the correct context
+					DPrintfNew(ErrorLevel, "Multiple concurrent values, and no logic to choose the one to update")
+					DPrintfNew(ErrorLevel, "dynamoArgs.SentKeyValue[%v]: %v", key, dynamoArgs.SentKeyValue[key])
+				}
+			}
+		}
+	}
+	rf.mu.Unlock()
+}
+
 // *************************** Periodic Go Routines ***************************
+
+func (rf *Dynamo) performPingAndUpdate(peerNumber int, isAlive bool) {
+	args := DynamoPingArgs{}
+	reply := DynamoPingReply{}
+
+	ack := rf.peers[peerNumber].Call("Dynamo.DynamoPing", &args, &reply, rf.RPCtimeout)
+	if isAlive {
+		if !ack {
+			DPrintfNew(WarningLevel, "Node %v unable to receive Ping ack from node: %v", rf.me, peerNumber)
+			// update local preference list
+			for i := 1; i < rf.nodeCount; i++ {
+				intendedNode := (peerNumber + i) % rf.nodeCount
+				if len(rf.prefList[intendedNode]) != 0 {
+					// update the node with the tmp values
+					newValue := []int{}
+					newValue = append(newValue, rf.prefList[intendedNode]...)
+					newValue = append(newValue, rf.prefList[peerNumber]...)
+					rf.prefList[intendedNode] = newValue
+					rf.prefList[peerNumber] = []int{}
+					break
+				}
+			}
+
+			// send out new preference list
+			secondArgs := DynamoUpdatePrefArgs{}
+			secondReply := DynamoUpdatePrefReply{}
+			secondArgs.UpdatedPrefList = make(map[int][]int)
+			for node, value := range rf.prefList {
+				tmp := make([]int, len(value))
+				copy(tmp, value)
+				secondArgs.UpdatedPrefList[node] = tmp
+			}
+
+			// loop through all nodes that this node thinks is alive and send below RPC to them
+			for i := 0; i < rf.nodeCount; i++ {
+				if len(rf.prefList[i]) != 0 && (i != rf.me) {
+					rf.peers[i].Call("Dynamo.DynamoUpdatePrefList", &secondArgs, &secondReply, 0) //rf.RPCtimeout)
+					// if !secondAck {
+					// 	DPrintfNew(WarningLevel, "Node %v unable to receive UpdatePrefList ack from node: %v", rf.me, i)
+					// }
+				}
+			}
+
+			DPrintfNew(DebugLevel, "Node %v found a failed node: %v", rf.me, peerNumber)
+		}
+	} else {
+		if ack {
+			DPrintfNew(WarningLevel, "Node %v received a Ping ack from node: %v", rf.me, peerNumber)
+			// update local preference list
+			var temporaryNode int
+			for i := 1; i < rf.nodeCount; i++ {
+				intendedNode := (peerNumber + i) % rf.nodeCount
+
+				result := contains(rf.prefList[intendedNode], peerNumber)
+				if result {
+					temporaryNode = intendedNode
+					break
+				}
+			}
+
+			for key, value := range rf.prefList[temporaryNode] {
+				if value == peerNumber {
+					newValue := []int{}
+					newValue = append(newValue, rf.prefList[temporaryNode][key:]...)
+					rf.prefList[temporaryNode] = rf.prefList[temporaryNode][:key]
+					rf.prefList[peerNumber] = newValue
+
+				}
+			}
+
+			// send out new preference list
+			secondArgs := DynamoUpdatePrefArgs{}
+			secondReply := DynamoUpdatePrefReply{}
+			secondArgs.UpdatedPrefList = make(map[int][]int)
+			for node, value := range rf.prefList {
+				tmp := make([]int, len(value))
+				copy(tmp, value)
+				secondArgs.UpdatedPrefList[node] = tmp
+			}
+
+			// notify the nodes after peerNumber in the Dynamo ring they need to send their updates to peerNumber
+			otherReply := DynamoRequestToSendKVReply{}
+			otherArgs := DynamoRequestToSendKVArgs{peerNumber}
+			sendCount := 0
+			indexCount := 1
+			var recipient int
+			for {
+				recipient = (peerNumber + indexCount) % rf.nodeCount
+				if len(rf.prefList[recipient]) != 0 {
+					DPrintfNew(DebugLevel, "Node %v sending DynamoRequestToSendKV to node: %v", rf.me, recipient)
+					otherAck := rf.peers[recipient].Call("Dynamo.DynamoRequestToSendKV", &otherArgs, &otherReply, rf.RPCtimeout)
+					if !otherAck {
+						DPrintfNew(ErrorLevel, "Node %v unable to receive DynamoRequestToSendKV ack from node: %v", rf.me, recipient)
+					}
+					sendCount++
+				}
+				if sendCount >= rf.replicas {
+					break
+				}
+				indexCount++
+			}
+
+			DPrintfNew(DebugLevel, "Node %v finished updating: %v", rf.me, recipient)
+
+			// loop through all nodes that this node thinks is alive and send below RPC to them
+			for i := 0; i < rf.nodeCount; i++ {
+				if len(rf.prefList[i]) != 0 && (i != rf.me) {
+					rf.peers[i].Call("Dynamo.DynamoUpdatePrefList", &secondArgs, &secondReply, 0) //rf.RPCtimeout)
+					// if !secondAck {
+					// 	DPrintfNew(WarningLevel, "Node %v unable to receive UpdatePrefList ack from node: %v", rf.me, i)
+					// }
+				}
+			}
+
+			DPrintfNew(DebugLevel, "Node %v found a revived node: %v", rf.me, peerNumber)
+		}
+	}
+
+	// else {
+	// 	DPrintfNew(DebugLevel, "Node %v successfully ping'd node: %v", rf.me, peerNumber)
+	// }
+}
 
 func (rf *Dynamo) failureDetection() {
 	for {
@@ -564,9 +751,6 @@ func (rf *Dynamo) failureDetection() {
 		if rf.killed() {
 			break
 		}
-
-		args := DynamoPingArgs{}
-		reply := DynamoPingReply{}
 
 		// get a list of nodes which are alive
 		aliveList := rf.getListLiveNodes()
@@ -582,47 +766,8 @@ func (rf *Dynamo) failureDetection() {
 					break
 				}
 			}
-			ack := rf.peers[peerNumber].Call("Dynamo.DynamoPing", &args, &reply, rf.RPCtimeout)
-			if !ack {
-				// update local preference list
-				for i := 1; i < rf.nodeCount; i++ {
-					intendedNode := (peerNumber + i) % rf.nodeCount
-					if len(rf.prefList[intendedNode]) != 0 {
-						// update the node with the tmp values
-						newValue := []int{}
-						newValue = append(newValue, rf.prefList[intendedNode]...)
-						newValue = append(newValue, rf.prefList[peerNumber]...)
-						rf.prefList[intendedNode] = newValue
-						rf.prefList[peerNumber] = []int{}
-						break
-					}
-				}
-
-				// send out new preference list
-				secondArgs := DynamoUpdatePrefArgs{}
-				secondReply := DynamoUpdatePrefReply{}
-				secondArgs.UpdatedPrefList = make(map[int][]int)
-				for node, value := range rf.prefList {
-					tmp := make([]int, len(value))
-					copy(tmp, value)
-					secondArgs.UpdatedPrefList[node] = tmp
-				}
-
-				// loop through all nodes that this node thinks is alive and send below RPC to them
-				for i := 0; i < rf.nodeCount; i++ {
-					if len(rf.prefList[i]) != 0 && (i != rf.me) {
-						secondAck := rf.peers[i].Call("Dynamo.DynamoUpdatePrefList", &secondArgs, &secondReply, rf.RPCtimeout)
-						if !secondAck {
-							DPrintfNew(InfoLevel, "Node %v unable to receive UpdatePrefList ack from node: %v", rf.me, i)
-						}
-					}
-				}
-
-				DPrintfNew(DebugLevel, "Node %v found a failed node: %v", rf.me, peerNumber)
-			}
-			// else {
-			// 	DPrintfNew(DebugLevel, "Node %v successfully ping'd node: %v", rf.me, peerNumber)
-			// }
+			// we assume this peer should be alive
+			rf.performPingAndUpdate(peerNumber, true)
 		}
 	}
 }

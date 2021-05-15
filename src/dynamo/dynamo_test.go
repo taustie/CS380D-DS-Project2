@@ -19,7 +19,6 @@ import (
 // 3) Send many get requests to the Dynamo cluster.
 // 4) Verify all values match expected value since coordinator will handle response.
 func TestNormalMinQuorum2A(t *testing.T) {
-	// *** functions implemented in dynamo_wrapper and called here ***
 	nodes := 10
 	replicas := 3
 	quorumR := 1
@@ -47,7 +46,6 @@ func TestNormalMinQuorum2A(t *testing.T) {
 // 3) Send many get requests to the Dynamo cluster.
 // 4) Check if all values match expected value and if any fail since a quorum must handle response.
 func TestNormalMaxQuorum2A(t *testing.T) {
-	// *** functions implemented in dynamo_wrapper and called here ***
 	nodes := 10
 	replicas := 3
 	quorumR := replicas
@@ -67,7 +65,6 @@ func TestNormalMaxQuorum2A(t *testing.T) {
 // 1) Configure: # nodes > 5, # replicas >= 5, R = all replicas, W = all replicas
 // 2) Only failure detect messages exchanged, and verify all nodes remain online
 func TestNoActivity2A(t *testing.T) {
-	// *** functions implemented in dynamo_wrapper and called here ***
 	nodes := 10
 	replicas := 3
 	quorumR := replicas
@@ -93,7 +90,6 @@ func TestNoActivity2A(t *testing.T) {
 // 5) Wait for updates to the global preference list.
 // 6) Write multiple updates to dynamo and verify all are successful (hinted handoff worked)
 func TestSingleNodeFailure2B(t *testing.T) {
-	// *** functions implemented in dynamo_wrapper and called here ***
 	nodes := 10
 	replicas := 3
 	quorumR := replicas
@@ -138,7 +134,6 @@ func TestSingleNodeFailure2B(t *testing.T) {
 // 5) Wait for updates to the global preference list.
 // 6) Write multiple updates to dynamo and verify all are successful (hinted handoff worked)
 func TestNormalUpdatesMaxQuorum2B(t *testing.T) {
-	// *** functions implemented in dynamo_wrapper and called here ***
 	nodes := 10
 	replicas := 3
 	quorumR := replicas
@@ -284,11 +279,50 @@ func TestNormalUpdatesMaxQuorum2B(t *testing.T) {
 // 1) Configure: # nodes = arbitrary, # replicas = arbitrary, R = # replicas, W = # replicas
 // 2) Perform TestSingleNodeFailure2B steps 2-6
 // 4) Revive the coordinator node.
-// 5) Wait for updates to the global preference list.
-// 6) Once updated, target the revived coordinator using get requests.
-// 7) Verify stale data is not returned
+// 5) Target the revived coordinator using get requests.
+// 6) This should trigger a ping and update to global pref list
+// 7) Verify updates to the global preference list
+// 8) Target the revived coordinator using get requests.
+// 9) Verify stale data is not returned
 func TestStaleData2B(t *testing.T) {
+	nodes := 10
+	replicas := 3
+	quorumR := replicas
+	quorumW := replicas
+	// Start-up dynamo (Config # nodes, # replicas, R, W, bring all nodes online, generate the static preference list, enable the network)
+	cfg := make_config(t, nodes, replicas, quorumR, quorumW, false)
+	defer cfg.cleanup()
+	cfg.begin("Test (2B): hinted handoff with stale data test")
 
+	test_count := 100
+	avoidNodeList := []int{}
+	cfg.putData("Key number: ", test_count, nodes, avoidNodeList, 0, 1)
+	removedNode := rand.Intn(nodes)
+	cfg.disconnect(removedNode)
+	avoidNodeList = append(avoidNodeList, removedNode)
+	fmt.Println("Node ", removedNode, "is down")
+	var inspectNode int
+	if removedNode == 0 {
+		inspectNode = 1
+	} else {
+		inspectNode = 0
+	}
+	cfg.checkForFailure(inspectNode, removedNode, 3)
+	cfg.putData("Key: ", test_count, nodes, avoidNodeList, 2, 1)
+	cfg.getData("Key: ", test_count, nodes, avoidNodeList, 2, 1)
+	cfg.connect(removedNode)
+	fmt.Println("Node ", removedNode, "is up")
+	cfg.getData("Key: ", test_count, nodes, avoidNodeList, 2, 1)
+	// check continuously for 5 seconds
+	for i := 0; i < 100; i++ {
+		peerNumber := rand.Intn(nodes)
+		cfg.checkAllAlive(peerNumber)
+		time.Sleep(100 * time.Millisecond)
+	}
+	avoidNodeList = []int{}
+	cfg.putData("Key: blah", test_count, nodes, avoidNodeList, 2, -50)
+	cfg.getData("Key: blah", test_count, nodes, avoidNodeList, 2, -50)
+	cfg.end()
 }
 
 // Description:
