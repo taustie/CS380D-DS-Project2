@@ -9,8 +9,6 @@ import (
 	"math/rand"
 	"testing"
 	"time"
-
-	"github.com/DistributedClocks/GoVector/govec/vclock"
 )
 
 // Description:
@@ -337,43 +335,4 @@ func TestRingPartition2C(t *testing.T) {
 // 2)
 func TestRingPartitionWithNodeFailure2C(t *testing.T) {
 
-}
-
-func TestVectorClockEx(t *testing.T) {
-	n1 := vclock.New()
-	n2 := vclock.New()
-
-	n1.Set("a", 1)
-	n1.Set("b", 2)
-	n1.Set("c", 3)
-	n2.Set("a", 1)
-	n2.Set("b", 2)
-	n2.Set("d", 3)
-
-	if n1.Compare(n2, vclock.Equal) {
-		failComparison(t, "Clocks are defined as Equal: n1 = %s | n2 = %s", n1, n2)
-	} else if n1.Compare(n2, vclock.Ancestor) {
-		failComparison(t, "Clocks are defined as Ancestor: n1 = %s | n2 = %s", n1, n2)
-	} else if n1.Compare(n2, vclock.Descendant) {
-		failComparison(t, "Clocks are defined as Descendant: n1 = %s | n2 = %s", n1, n2)
-	} else if !n1.Compare(n2, vclock.Concurrent) {
-		failComparison(t, "Clocks not defined as Concurrent: n1 = %s | n2 = %s", n1, n2)
-	}
-
-	if n2.Compare(n1, vclock.Equal) {
-		failComparison(t, "Clocks are defined as Equal: n1 = %s | n2 = %s", n2, n1)
-	} else if n2.Compare(n1, vclock.Ancestor) {
-		failComparison(t, "Clocks are defined as Ancestor: n1 = %s | n2 = %s", n2, n1)
-	} else if n2.Compare(n1, vclock.Descendant) {
-		failComparison(t, "Clocks are defined as Descendant: n1 = %s | n2 = %s", n2, n1)
-	} else if !n2.Compare(n1, vclock.Concurrent) {
-		failComparison(t, "Clocks not defined as Concurrent: n1 = %s | n2 = %s", n2, n1)
-	}
-
-	// fmt.Println(n1)
-	// fmt.Println(n2)
-}
-
-func failComparison(t *testing.T, failMessage string, clock1, clock2 vclock.VClock) {
-	t.Fatalf(failMessage, clock1.ReturnVCString(), clock2.ReturnVCString())
 }

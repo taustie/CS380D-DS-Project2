@@ -6,7 +6,7 @@ import (
 )
 
 // Debugging
-const Debug = InfoLevel
+const Debug = None //InfoLevel
 
 // Enumerated lookup for log level type
 const (
